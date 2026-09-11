@@ -5,3 +5,14 @@ node_modules/
 .env.*
 !.env.example
 dist/
+.claude/
+.windsurf/
+prisma-cli/
+prisma-client-api/
+prisma-compute/
+prisma-database-setup/
+prisma-driver-adapter-implementation/
+prisma-mongodb-upgrade/
+prisma-postgres/
+prisma-postgres-setup/
+prisma-upgrade-v7/

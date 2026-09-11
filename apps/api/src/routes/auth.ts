@@ -1,19 +1,20 @@
 import { Router, Request, Response } from "express";
 import { ApiError } from "@nextcrm/core";
 // We import the raw, unscoped PrismaClient directly from @nextcrm/db here.
-// Signup and login are the only two routes permitted to bypass workspace scoping,
-// because neither operation has an established workspace context yet (during signup
-// the workspace does not yet exist; during login we are authenticating the global User).
+// Signup, login, refresh, and logout are permitted to bypass workspace scoping,
+// because these operations authenticate or manage global User sessions rather than workspace-scoped data.
 import { prisma } from "@nextcrm/db";
 import { asyncHandler } from "../middleware/asyncHandler";
 import { hashPassword, comparePassword } from "../utils/password";
-import { issueToken } from "../utils/jwt";
+import { issueAccessToken } from "../utils/jwt";
+import { generateRefreshToken, hashToken } from "../utils/refreshToken";
 
 export const authRouter = Router();
 
 /**
  * POST /signup
- * Creates Workspace + User + Membership(role=owner) atomically.
+ * Creates Workspace + User + Membership(role=owner) atomically,
+ * issues short-lived accessToken and 30-day refreshToken.
  */
 authRouter.post(
   "/signup",
@@ -63,14 +64,28 @@ authRouter.post(
       return { workspace: createdWorkspace, user: createdUser };
     });
 
-    const token = issueToken({
+    const accessToken = issueAccessToken({
       userId: user.id,
       workspaceId: workspace.id,
       role: "owner",
     });
 
+    const rawRefreshToken = generateRefreshToken();
+    const tokenHash = hashToken(rawRefreshToken);
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await prisma.refreshToken.create({
+      data: {
+        userId: user.id,
+        tokenHash,
+        expiresAt,
+      },
+    });
+
+    // BREAKING CHANGE: Renamed "token" field to "accessToken" for clarity now that refresh tokens are returned alongside access tokens.
     res.status(201).json({
-      token,
+      accessToken,
+      refreshToken: rawRefreshToken,
       workspace: {
         id: workspace.id,
         name: workspace.name,
@@ -81,7 +96,7 @@ authRouter.post(
 
 /**
  * POST /login
- * Authenticates user credentials and returns a workspace-scoped token.
+ * Authenticates user credentials and returns a workspace-scoped accessToken and refreshToken.
  */
 authRouter.post(
   "/login",
@@ -120,10 +135,22 @@ authRouter.post(
     // Default to the first membership as active workspace
     const primaryMembership = user.memberships[0];
 
-    const token = issueToken({
+    const accessToken = issueAccessToken({
       userId: user.id,
       workspaceId: primaryMembership.workspaceId,
       role: primaryMembership.role as "owner" | "agent",
+    });
+
+    const rawRefreshToken = generateRefreshToken();
+    const tokenHash = hashToken(rawRefreshToken);
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await prisma.refreshToken.create({
+      data: {
+        userId: user.id,
+        tokenHash,
+        expiresAt,
+      },
     });
 
     const workspaces = user.memberships.map((m) => ({
@@ -132,9 +159,153 @@ authRouter.post(
       role: m.role,
     }));
 
+    // BREAKING CHANGE: Renamed "token" field to "accessToken" for clarity now that refresh tokens are returned alongside access tokens.
     res.status(200).json({
-      token,
+      accessToken,
+      refreshToken: rawRefreshToken,
       workspaces,
     });
+  })
+);
+
+/**
+ * POST /refresh
+ * Validates the incoming refresh token, detects potential token reuse,
+ * rotates the refresh token atomically, and issues a new access + refresh token pair.
+ */
+authRouter.post(
+  "/refresh",
+  asyncHandler(async (req: Request, res: Response) => {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      throw new ApiError(400, "refreshToken is required");
+    }
+
+    const incomingHash = hashToken(refreshToken);
+
+    const tokenRecord = await prisma.refreshToken.findUnique({
+      where: { tokenHash: incomingHash },
+    });
+
+    if (!tokenRecord) {
+      throw new ApiError(401, "Invalid refresh token");
+    }
+
+    // REUSE DETECTION:
+    // If replacedBy is set, this token was rotated in a previous request and is being presented again.
+    // This indicates potential token theft or replay attack. We immediately revoke ALL existing sessions for this user.
+    if (tokenRecord.replacedBy) {
+      await prisma.refreshToken.updateMany({
+        where: {
+          userId: tokenRecord.userId,
+          revokedAt: null,
+        },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+
+      throw new ApiError(
+        401,
+        "Refresh token reuse detected — all sessions have been revoked, please log in again"
+      );
+    }
+
+    // Clean revocation / logged out token (revokedAt is set, but was not rotated)
+    if (tokenRecord.revokedAt) {
+      throw new ApiError(401, "Invalid refresh token");
+    }
+
+    if (tokenRecord.expiresAt < new Date()) {
+      throw new ApiError(401, "Refresh token expired");
+    }
+
+    // Valid token: fetch user and their memberships to rebuild the access token payload
+    const user = await prisma.user.findUnique({
+      where: { id: tokenRecord.userId },
+      include: {
+        memberships: {
+          include: {
+            workspace: true,
+          },
+        },
+      },
+    });
+
+    if (!user || !user.memberships || user.memberships.length === 0) {
+      throw new ApiError(403, "This account has no workspace");
+    }
+
+    const primaryMembership = user.memberships[0];
+
+    const newRawRefreshToken = generateRefreshToken();
+    const newRefreshTokenHash = hashToken(newRawRefreshToken);
+    const newExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    // Atomically create the new refresh token record and mark the old one as revoked + replaced
+    await prisma.$transaction(async (tx) => {
+      const newRefreshTokenRecord = await tx.refreshToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: newRefreshTokenHash,
+          expiresAt: newExpiresAt,
+        },
+      });
+
+      await tx.refreshToken.update({
+        where: { id: tokenRecord.id },
+        data: {
+          revokedAt: new Date(),
+          replacedBy: newRefreshTokenRecord.id,
+        },
+      });
+    });
+
+    // Issue a new access token using the user's first membership (same as login)
+    const accessToken = issueAccessToken({
+      userId: user.id,
+      workspaceId: primaryMembership.workspaceId,
+      role: primaryMembership.role as "owner" | "agent",
+    });
+
+    res.status(200).json({
+      accessToken,
+      refreshToken: newRawRefreshToken,
+    });
+  })
+);
+
+/**
+ * POST /logout
+ * Revokes the provided refresh token.
+ * This endpoint is idempotent — if the token is not found or already revoked,
+ * it returns success anyway without erroring.
+ */
+authRouter.post(
+  "/logout",
+  asyncHandler(async (req: Request, res: Response) => {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      throw new ApiError(400, "refreshToken is required");
+    }
+
+    const incomingHash = hashToken(refreshToken);
+
+    const tokenRecord = await prisma.refreshToken.findUnique({
+      where: { tokenHash: incomingHash },
+    });
+
+    if (tokenRecord && !tokenRecord.revokedAt) {
+      await prisma.refreshToken.update({
+        where: { id: tokenRecord.id },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+    }
+
+    res.status(200).json({ message: "Logged out" });
   })
 );
