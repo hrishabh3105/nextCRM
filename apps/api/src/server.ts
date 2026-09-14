@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import { env } from "./config/env";
 import { authRouter } from "./routes/auth";
+import { contactsRouter } from "./routes/contacts";
+import { requireAuth } from "./middleware/auth";
 import { errorHandler } from "./middleware/errorHandler";
 
 const app = express();
@@ -16,6 +18,7 @@ app.get("/health", (req, res) => {
 
 // Mount routes
 app.use("/api/v1/auth", authRouter);
+app.use("/api/v1/contacts", requireAuth, contactsRouter);
 
 // Error handling middleware (must be registered last)
 app.use(errorHandler);

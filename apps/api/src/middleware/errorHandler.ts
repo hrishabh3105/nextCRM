@@ -13,6 +13,11 @@ export const errorHandler = (
     return;
   }
 
+  if (err.code === "P2025") {
+    res.status(404).json({ error: "Record not found" });
+    return;
+  }
+
   if (err instanceof ApiError) {
     res.status(err.statusCode).json({
       error: err.message,

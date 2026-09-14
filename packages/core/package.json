@@ -3,5 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "main": "src/index.ts",
-  "types": "src/index.ts"
+  "types": "src/index.ts",
+  "dependencies": {
+    "@nextcrm/db": "*",
+    "zod": "^4.6.2"
+  }
 }
