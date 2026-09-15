@@ -15,6 +15,7 @@ model Workspace {
 
   memberships Membership[]
   contacts    Contact[]
+  channels    Channel[]
 
   @@map("workspaces")
 }
@@ -80,3 +81,21 @@ model Contact {
   @@map("contacts")
 }
 
+model Channel {
+  id             String   @id @default(cuid())
+  workspaceId    String   @map("workspace_id")
+  type           String   // "whatsapp" | "sms"
+  provider       String   // "meta" | "msg91"
+  wabaId         String?  @map("waba_id")
+  phoneNumberId  String?  @map("phone_number_id")
+  phoneNumber    String?  @map("phone_number")
+  accessTokenEnc String?  @map("access_token_enc")
+  status         String   @default("pending")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@index([workspaceId])
+  @@map("channels")
+}
