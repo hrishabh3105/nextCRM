@@ -4,6 +4,7 @@ import { env } from "./config/env";
 import { authRouter } from "./routes/auth";
 import { contactsRouter } from "./routes/contacts";
 import { channelsRouter } from "./routes/channels";
+import { templatesRouter } from "./routes/templates";
 import { requireAuth } from "./middleware/auth";
 import { errorHandler } from "./middleware/errorHandler";
 
@@ -21,6 +22,7 @@ app.get("/health", (req, res) => {
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/contacts", requireAuth, contactsRouter);
 app.use("/api/v1/channels", requireAuth, channelsRouter);
+app.use("/api/v1/templates", requireAuth, templatesRouter);
 
 // Error handling middleware (must be registered last)
 app.use(errorHandler);

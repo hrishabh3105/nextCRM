@@ -16,6 +16,7 @@ model Workspace {
   memberships Membership[]
   contacts    Contact[]
   channels    Channel[]
+  templates   Template[]
 
   @@map("workspaces")
 }
@@ -95,7 +96,31 @@ model Channel {
   updatedAt      DateTime @updatedAt @map("updated_at")
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
+  templates Template[]
 
   @@index([workspaceId])
   @@map("channels")
 }
+
+model Template {
+  id                 String   @id @default(cuid())
+  workspaceId        String   @map("workspace_id")
+  channelId          String   @map("channel_id")
+  providerName       String   @map("provider_name")
+  providerTemplateId String?  @map("provider_template_id")
+  language           String   @default("en_US")
+  category           String
+  bodyPreview        String   @map("body_preview")
+  variableCount      Int      @default(0) @map("variable_count")
+  status             String   @default("draft")
+  rejectionReason    String?  @map("rejection_reason")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  channel   Channel   @relation(fields: [channelId], references: [id])
+
+  @@index([workspaceId])
+  @@map("templates")
+}
+
