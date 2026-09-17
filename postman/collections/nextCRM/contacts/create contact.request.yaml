@@ -1,0 +1,19 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/contacts"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"phone\": \"9876543210\",\r
+
+    \  \"name\": \"Test Contact\",\r
+
+    \  \"email\": \"contact@test.com\"\r
+
+    }"
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 2067069856856743

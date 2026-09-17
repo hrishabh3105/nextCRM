@@ -1,0 +1,23 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/templates"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"channelId\": \"\",\r
+
+    \  \"name\": \"\",\r
+
+    \  \"language\": \"en_US\",\r
+
+    \  \"category\": \"utility\",\r
+
+    \  \"body\": \"\"\r
+
+    }"
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 1789634119851

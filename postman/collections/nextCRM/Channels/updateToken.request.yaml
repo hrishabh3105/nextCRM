@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/channels/:id"
+method: PATCH
+pathVariables:
+  id: ""
+body:
+  type: json
+  content: '{ "accessToken": "" }'
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 4293416656664974

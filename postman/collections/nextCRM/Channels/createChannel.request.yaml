@@ -1,0 +1,25 @@
+$kind: http-request
+url: POST {{baseUrl}}/api/v1/channels
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"type\": \"whatsapp\",\r
+
+    \  \"provider\": \"meta\",\r
+
+    \  \"wabaId\": \"\",\r
+
+    \  \"phoneNumberId\": \"\",\r
+
+    \  \"phoneNumber\": \"\",\r
+
+    \  \"accessToken\": \"\"\r
+
+    }"
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 152343073045427

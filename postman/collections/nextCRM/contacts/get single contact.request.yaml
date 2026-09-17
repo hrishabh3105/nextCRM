@@ -1,0 +1,10 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/contacts/:id"
+method: GET
+pathVariables:
+  id: ""
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 280482073625612

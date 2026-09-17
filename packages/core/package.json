@@ -6,6 +6,8 @@
   "types": "src/index.ts",
   "dependencies": {
     "@nextcrm/db": "*",
+    "bullmq": "^6.3.6",
+    "ioredis": "^6.0.0",
     "zod": "^4.6.2"
   }
 }

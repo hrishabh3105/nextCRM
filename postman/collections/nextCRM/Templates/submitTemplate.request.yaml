@@ -1,0 +1,10 @@
+$kind: http-request
+url: POST {{baseUrl}}/api/v1/templates/:id/submit
+method: POST
+pathVariables:
+  id: ""
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 1737351398362386

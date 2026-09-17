@@ -1,0 +1,13 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/templates/:id/send-test"
+method: POST
+pathVariables:
+  id: ""
+body:
+  type: json
+  content: '{ "to": "", "variables": [] }'
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 2471575362723413

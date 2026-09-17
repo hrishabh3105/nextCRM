@@ -1,17 +1,19 @@
 import { Router, Request, Response } from "express";
-import { ApiError, forWorkspace, validateOrThrow } from "@nextcrm/core";
+import {
+  ApiError,
+  forWorkspace,
+  validateOrThrow,
+  decryptToken,
+  submitTemplate,
+  getTemplateStatus,
+  sendTemplateMessage,
+} from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
   createTemplateSchema,
   CreateTemplateInput,
   countVariables,
 } from "../validation/templateSchema";
-import { decryptToken } from "../utils/tokenEncryption";
-import {
-  submitTemplate,
-  getTemplateStatus,
-  sendTemplateMessage,
-} from "../services/metaClient";
 
 export const templatesRouter = Router();
 

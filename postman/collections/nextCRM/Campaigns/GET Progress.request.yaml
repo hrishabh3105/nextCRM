@@ -1,0 +1,10 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/campaigns/:id"
+method: GET
+pathVariables:
+  id: ""
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 1051264293516348

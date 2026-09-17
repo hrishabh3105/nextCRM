@@ -1,5 +1,4 @@
 import crypto from "crypto";
-import { env } from "../config/env";
 
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH_BYTES = 12; // 96 bits is the standard, recommended IV size for AES-GCM
@@ -17,11 +16,14 @@ const IV_LENGTH_BYTES = 12; // 96 bits is the standard, recommended IV size for 
  */
 
 /**
- * Derives a 32-byte Buffer key from env.TOKEN_ENCRYPTION_KEY.
+ * Derives a 32-byte Buffer key from process.env.TOKEN_ENCRYPTION_KEY.
  * Accepts a 64-character hex string directly or falls back to SHA-256 hashing.
  */
 function getEncryptionKey(): Buffer {
-  const rawKey = env.TOKEN_ENCRYPTION_KEY;
+  const rawKey = process.env.TOKEN_ENCRYPTION_KEY;
+  if (!rawKey) {
+    throw new Error("Environment variable TOKEN_ENCRYPTION_KEY is required but not set.");
+  }
   if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
     return Buffer.from(rawKey, "hex");
   }

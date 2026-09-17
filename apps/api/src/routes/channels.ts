@@ -1,11 +1,15 @@
 import { Router, Request, Response } from "express";
-import { ApiError, forWorkspace, validateOrThrow } from "@nextcrm/core";
+import {
+  ApiError,
+  forWorkspace,
+  validateOrThrow,
+  encryptToken,
+} from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
   createChannelSchema,
   CreateChannelInput,
 } from "../validation/channelSchema";
-import { encryptToken } from "../utils/tokenEncryption";
 
 export const channelsRouter = Router();
 

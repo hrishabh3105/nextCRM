@@ -1,0 +1,19 @@
+{
+  "name": "@nextcrm/worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@nextcrm/core": "*",
+    "@nextcrm/db": "*",
+    "bullmq": "^6.3.6",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

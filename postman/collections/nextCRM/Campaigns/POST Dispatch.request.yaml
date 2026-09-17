@@ -1,0 +1,10 @@
+$kind: http-request
+url: "{{baseUrl}}/api/v1/campaigns/:id/dispatch"
+method: POST
+pathVariables:
+  id: ""
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 421627522224564

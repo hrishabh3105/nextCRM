@@ -1,0 +1,4 @@
+name: nextCRM
+values:
+  - key: baseUrl
+    value: ''

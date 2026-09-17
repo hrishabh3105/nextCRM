@@ -1,0 +1,14 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/api/v1/contacts/:id"
+method: PATCH
+pathVariables:
+  id: ""
+body:
+  type: json
+  content: '{ "name": "Updated Name" }'
+auth:
+  type: bearer
+  credentials:
+    token: "{{accessToken}}"
+order: 2996255240096832

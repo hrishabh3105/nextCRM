@@ -17,6 +17,7 @@ model Workspace {
   contacts    Contact[]
   channels    Channel[]
   templates   Template[]
+  campaigns   Campaign[]
 
   @@map("workspaces")
 }
@@ -75,7 +76,8 @@ model Contact {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id])
+  campaignRecipients CampaignRecipient[]
 
   @@unique([workspaceId, phone])
   @@index([workspaceId])
@@ -95,8 +97,9 @@ model Channel {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  workspace Workspace  @relation(fields: [workspaceId], references: [id])
   templates Template[]
+  campaigns Campaign[]
 
   @@index([workspaceId])
   @@map("channels")
@@ -117,10 +120,48 @@ model Template {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
-  channel   Channel   @relation(fields: [channelId], references: [id])
+  workspace Workspace  @relation(fields: [workspaceId], references: [id])
+  channel   Channel    @relation(fields: [channelId], references: [id])
+  campaigns Campaign[]
 
   @@index([workspaceId])
   @@map("templates")
+}
+
+model Campaign {
+  id              String    @id @default(cuid())
+  workspaceId     String    @map("workspace_id")
+  templateId      String    @map("template_id")
+  channelId       String    @map("channel_id")
+  name            String
+  status          String    @default("draft")
+  totalRecipients Int       @default(0) @map("total_recipients")
+  sentCount       Int       @default(0) @map("sent_count")
+  failedCount     Int       @default(0) @map("failed_count")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  workspace  Workspace           @relation(fields: [workspaceId], references: [id])
+  template   Template            @relation(fields: [templateId], references: [id])
+  channel    Channel             @relation(fields: [channelId], references: [id])
+  recipients CampaignRecipient[]
+
+  @@index([workspaceId])
+  @@map("campaigns")
+}
+
+model CampaignRecipient {
+  id         String  @id @default(cuid())
+  campaignId String  @map("campaign_id")
+  contactId  String  @map("contact_id")
+  messageId  String? @map("message_id")
+  status     String  @default("pending")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+  contact  Contact  @relation(fields: [contactId], references: [id])
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId, status])
+  @@map("campaign_recipients")
 }
 

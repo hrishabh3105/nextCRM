@@ -1,4 +1,4 @@
-import { ApiError } from "@nextcrm/core";
+import { ApiError } from "../apiError";
 
 const META_GRAPH_BASE_URL = "https://graph.facebook.com/v20.0";
 
@@ -143,6 +143,7 @@ export async function sendTemplateMessage(params: {
             type: "body",
             parameters: variables.map((variable) => ({
               type: "text",
+              variable: undefined,
               text: variable,
             })),
           },
