@@ -16,4 +16,6 @@ export const env = {
   // Generate via: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
   // Must be DIFFERENT from JWT_SECRET — different secrets protecting different things.
   TOKEN_ENCRYPTION_KEY: required("TOKEN_ENCRYPTION_KEY"),
+  META_WEBHOOK_VERIFY_TOKEN: required("META_WEBHOOK_VERIFY_TOKEN"),
+  META_APP_SECRET: required("META_APP_SECRET"),
 };
