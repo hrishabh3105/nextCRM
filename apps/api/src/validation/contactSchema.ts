@@ -46,9 +46,12 @@ export const createContactSchema = z.object({
 
 /**
  * Validation schema for updating an existing Contact.
- * Same shape as createContactSchema, but all fields are optional.
+ * Same shape as createContactSchema, but all fields are optional,
+ * and includes an optional optedIn boolean to record consent or opt-out.
  */
-export const updateContactSchema = createContactSchema.partial();
+export const updateContactSchema = createContactSchema.partial().extend({
+  optedIn: z.boolean().optional(),
+});
 
 export type CreateContactInput = z.infer<typeof createContactSchema>;
 export type UpdateContactInput = z.infer<typeof updateContactSchema>;

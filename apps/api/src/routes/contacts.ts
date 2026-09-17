@@ -74,7 +74,10 @@ contactsRouter.post(
     );
 
     const contact = await forWorkspace(req.workspaceId!).contact.create({
-      data: validatedData as any,
+      data: {
+        ...validatedData,
+        optedInAt: new Date(),
+      } as any,
     });
 
     res.status(201).json(contact);
@@ -93,9 +96,16 @@ contactsRouter.patch(
       req.body
     );
 
+    const { optedIn, ...contactData } = validatedData;
+
+    const updatePayload: any = { ...contactData };
+    if (typeof optedIn === "boolean") {
+      updatePayload.optedInAt = optedIn ? new Date() : null;
+    }
+
     const contact = await forWorkspace(req.workspaceId!).contact.update({
       where: { id: req.params.id },
-      data: validatedData,
+      data: updatePayload,
     });
 
     res.status(200).json(contact);
@@ -148,8 +158,14 @@ contactsRouter.post(
               phone: validatedPhone,
             },
           },
-          create: validatedData as any,
-          update: updateData,
+          create: {
+            ...validatedData,
+            optedInAt: new Date(),
+          } as any,
+          update: {
+            ...updateData,
+            optedInAt: new Date(),
+          },
         });
 
         imported++;
