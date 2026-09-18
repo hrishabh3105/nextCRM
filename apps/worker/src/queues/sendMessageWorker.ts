@@ -6,6 +6,7 @@ import {
   forWorkspace,
   sendTemplateMessage,
   decryptToken,
+  recordMessageCost,
 } from "@nextcrm/core";
 import { SendMessageJobData } from "./campaignDispatchWorker";
 
@@ -143,6 +144,12 @@ export const sendMessageWorker = new Worker<SendMessageJobData>(
       const updated = await db.campaign.update({
         where: { id: campaignId },
         data: { sentCount: { increment: 1 } },
+      });
+
+      await recordMessageCost({
+        workspaceId,
+        messageId: result.providerMessageId,
+        category: campaign.template.category,
       });
 
       // Check if campaign finished

@@ -1,0 +1,12 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/api/v1/conversations/cmu6m2vxs0000wshhqy5n8m8c/messages"
+method: POST
+body:
+  type: json
+  content: '{ "body": "this is a free form meessagee: Dhool chatwa denge Dhooool" }'
+auth:
+  type: bearer
+  credentials:
+    token: "{{json_web_token_0i8g}}"
+order: 1789717230700

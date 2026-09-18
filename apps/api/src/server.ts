@@ -7,6 +7,8 @@ import { channelsRouter } from "./routes/channels";
 import { templatesRouter } from "./routes/templates";
 import { campaignsRouter } from "./routes/campaigns";
 import { webhooksRouter } from "./routes/webhooks";
+import { conversationsRouter } from "./routes/conversations";
+import { usageRouter } from "./routes/usage";
 import { requireAuth } from "./middleware/auth";
 import { errorHandler } from "./middleware/errorHandler";
 
@@ -41,6 +43,8 @@ app.use("/api/v1/contacts", requireAuth, contactsRouter);
 app.use("/api/v1/channels", requireAuth, channelsRouter);
 app.use("/api/v1/templates", requireAuth, templatesRouter);
 app.use("/api/v1/campaigns", requireAuth, campaignsRouter);
+app.use("/api/v1/conversations", requireAuth, conversationsRouter);
+app.use("/api/v1/usage", requireAuth, usageRouter);
 
 // Error handling middleware (must be registered last)
 app.use(errorHandler);

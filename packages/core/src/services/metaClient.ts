@@ -186,3 +186,48 @@ export async function sendTemplateMessage(params: {
     providerMessageId,
   };
 }
+
+/**
+ * Sends a free-form WhatsApp message to a recipient within an open 24-hour window.
+ * POST https://graph.facebook.com/v20.0/{phoneNumberId}/messages
+ */
+export async function sendFreeformMessage(params: {
+  accessToken: string;
+  phoneNumberId: string;
+  to: string;
+  body: string;
+}): Promise<{ providerMessageId: string }> {
+  const { accessToken, phoneNumberId, to, body } = params;
+
+  const response = await fetch(`${META_GRAPH_BASE_URL}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: {
+        body,
+      },
+    }),
+  });
+
+  const data = (await response.json().catch(() => ({}))) as any;
+
+  if (!response.ok) {
+    handleMetaError(data);
+  }
+
+  const providerMessageId = data?.messages?.[0]?.id || data?.id;
+
+  if (!providerMessageId) {
+    throw new ApiError(502, "Meta response missing message ID", data);
+  }
+
+  return {
+    providerMessageId,
+  };
+}

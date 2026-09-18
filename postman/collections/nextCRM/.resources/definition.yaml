@@ -1,4 +1,11 @@
 $kind: collection
 variables:
-  accessToken: ""
-  refreshToken: ""
+  - key: accessToken
+    value: ""
+    disabled: false
+  - key: refreshToken
+    value: ""
+    disabled: false
+  - key: json_web_token_0i8g
+    secret: true
+    disabled: false

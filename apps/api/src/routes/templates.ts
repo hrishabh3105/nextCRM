@@ -7,6 +7,7 @@ import {
   submitTemplate,
   getTemplateStatus,
   sendTemplateMessage,
+  recordMessageCost,
 } from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
@@ -209,6 +210,12 @@ templatesRouter.post(
       templateName: template.providerName,
       language: template.language,
       variables: variables.map((v) => String(v)),
+    });
+
+    await recordMessageCost({
+      workspaceId: req.workspaceId!,
+      messageId: result.providerMessageId,
+      category: template.category,
     });
 
     res.status(200).json({ providerMessageId: result.providerMessageId });

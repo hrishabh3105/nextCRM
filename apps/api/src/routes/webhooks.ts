@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import express from "express";
 import { env } from "../config/env";
 import { verifyMetaSignature } from "../utils/verifyMetaSignature";
+import { handleInboundWebhookPayload } from "../services/inboundMessageHandler";
 
 export const webhooksRouter = Router();
 
@@ -35,12 +36,12 @@ webhooksRouter.get("/meta", (req: Request, res: Response) => {
  *   needed for HMAC signature verification before any JSON parsing.
  * - Verifies X-Hub-Signature-256 header against META_APP_SECRET using HMAC-SHA256.
  * - Responds 401 immediately if signature is missing or invalid.
- * - Parses JSON and logs the event payload, responding 200 immediately without blocking.
+ * - Parses JSON and processes inbound messages, updating Conversation and Message models, responding 200.
  */
 webhooksRouter.post(
   "/meta",
   express.raw({ type: "application/json" }),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     console.log("[webhook] POST /meta hit, headers: " + JSON.stringify(req.headers));
     const signature = req.headers["x-hub-signature-256"] as string | undefined;
     const rawBody = req.body;
@@ -59,10 +60,15 @@ webhooksRouter.post(
 
     try {
       const payload = JSON.parse(rawBody.toString("utf8"));
-      console.log(`[webhook] received event:\n${JSON.stringify(payload, null, 2)}`);
+
+      // TODO: move to a queue (like campaign-dispatch) if webhook processing time ever
+      // risks exceeding Meta's timeout, or if volume increases enough that inline DB writes
+      // here become a bottleneck.
+      await handleInboundWebhookPayload(payload);
+
       res.sendStatus(200);
     } catch (err) {
-      console.error("[webhook] Failed to parse JSON body:", err);
+      console.error("[webhook] Failed to process webhook event:", err);
       res.sendStatus(400);
     }
   }

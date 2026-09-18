@@ -17,7 +17,9 @@ model Workspace {
   contacts    Contact[]
   channels    Channel[]
   templates   Template[]
-  campaigns   Campaign[]
+  campaigns     Campaign[]
+  conversations Conversation[]
+  messages      Message[]
 
   @@map("workspaces")
 }
@@ -78,6 +80,8 @@ model Contact {
 
   workspace          Workspace           @relation(fields: [workspaceId], references: [id])
   campaignRecipients CampaignRecipient[]
+  conversations      Conversation[]
+  messages           Message[]
 
   @@unique([workspaceId, phone])
   @@index([workspaceId])
@@ -97,9 +101,10 @@ model Channel {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  workspace Workspace  @relation(fields: [workspaceId], references: [id])
-  templates Template[]
-  campaigns Campaign[]
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id])
+  templates     Template[]
+  campaigns     Campaign[]
+  conversations Conversation[]
 
   @@index([workspaceId])
   @@map("channels")
@@ -164,4 +169,80 @@ model CampaignRecipient {
   @@index([campaignId, status])
   @@map("campaign_recipients")
 }
+
+model Conversation {
+  id              String    @id @default(cuid())
+  workspaceId     String    @map("workspace_id")
+  contactId       String    @map("contact_id")
+  channelId       String    @map("channel_id")
+  lastInboundAt   DateTime? @map("last_inbound_at")
+  windowExpiresAt DateTime? @map("window_expires_at")
+  status          String    @default("open")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  contact   Contact   @relation(fields: [contactId], references: [id])
+  channel   Channel   @relation(fields: [channelId], references: [id])
+  messages  Message[]
+
+  @@unique([contactId, channelId])
+  @@index([workspaceId])
+  @@map("conversations")
+}
+
+model Message {
+  id                String    @id @default(cuid())
+  workspaceId       String    @map("workspace_id")
+  conversationId    String    @map("conversation_id")
+  contactId         String    @map("contact_id")
+  direction         String
+  providerMessageId String?   @map("provider_message_id")
+  body              String?
+  status            String    @default("received")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id])
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  contact      Contact      @relation(fields: [contactId], references: [id])
+
+  @@unique([workspaceId, providerMessageId])
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+model RateCard {
+  id            String   @id @default(cuid())
+  country       String
+  category      String
+  rate          Decimal  @db.Decimal(10, 4)
+  currency      String   @default("USD")
+  effectiveFrom DateTime @map("effective_from")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([country, category, effectiveFrom])
+  @@map("rate_card")
+}
+
+model MessageCost {
+  id           String   @id @default(cuid())
+  workspaceId  String   @map("workspace_id")
+  // Note: MessageCost.messageId does NOT have a formal @relation to any existing "Message"
+  // table for outbound campaign/template sends, because campaigns currently track sends via
+  // CampaignRecipient + Campaign, not a row in the Message model (Message is currently only
+  // used by the Conversation/inbound-webhook feature). For this pass, messageId stores the
+  // providerMessageId (Meta's own message ID) as a plain string — not a foreign key — since
+  // there is no single unified outbound message table yet linking campaign sends and
+  // conversation sends together. This is a known simplification, not a silent decision.
+  messageId    String   @unique @map("message_id")
+  category     String
+  rateAtSend   Decimal  @map("rate_at_send") @db.Decimal(10, 4)
+  billedAmount Decimal  @map("billed_amount") @db.Decimal(10, 4)
+  currency     String   @default("USD")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId])
+  @@map("message_costs")
+}
+
 
