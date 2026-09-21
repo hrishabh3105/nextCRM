@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  body {
+    font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    background-color: #FAFAF9;
+    color: #1C1C1E;
+    letter-spacing: -0.011em;
+  }
+
+  /* Crisp custom scrollbars for light theme UI */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #FAFAF9;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #E5E5E3;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #D4D4D0;
+  }
+}

@@ -2,7 +2,10 @@ import { Router, Request, Response } from "express";
 import express from "express";
 import { env } from "../config/env";
 import { verifyMetaSignature } from "../utils/verifyMetaSignature";
-import { handleInboundWebhookPayload } from "../services/inboundMessageHandler";
+import {
+  handleInboundWebhookPayload,
+  handleTemplateStatusUpdate,
+} from "../services/inboundMessageHandler";
 
 export const webhooksRouter = Router();
 
@@ -30,13 +33,13 @@ webhooksRouter.get("/meta", (req: Request, res: Response) => {
 
 /**
  * POST /meta
- * Webhook event receiver called by Meta for incoming events (delivery status, inbound messages).
+ * Webhook event receiver called by Meta for incoming events (delivery status, inbound messages, template updates).
  *
  * - Uses express.raw({ type: "application/json" }) route-level middleware to capture raw Buffer
  *   needed for HMAC signature verification before any JSON parsing.
  * - Verifies X-Hub-Signature-256 header against META_APP_SECRET using HMAC-SHA256.
  * - Responds 401 immediately if signature is missing or invalid.
- * - Parses JSON and processes inbound messages, updating Conversation and Message models, responding 200.
+ * - Parses JSON and processes template status updates and inbound messages, responding 200.
  */
 webhooksRouter.post(
   "/meta",
@@ -60,6 +63,15 @@ webhooksRouter.post(
 
     try {
       const payload = JSON.parse(rawBody.toString("utf8"));
+
+      const entries = payload?.entry ?? [];
+      const hasTemplateStatusUpdate = entries.some((entry: any) =>
+        entry.changes?.some((change: any) => change.field === "message_template_status_update")
+      );
+
+      if (hasTemplateStatusUpdate) {
+        await handleTemplateStatusUpdate(payload);
+      }
 
       // TODO: move to a queue (like campaign-dispatch) if webhook processing time ever
       // risks exceeding Meta's timeout, or if volume increases enough that inline DB writes

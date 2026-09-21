@@ -10,6 +10,21 @@ import { campaignDispatchQueue } from "../queues/campaignQueue";
 export const campaignsRouter = Router();
 
 /**
+ * GET /
+ * Lists all campaigns for the authenticated workspace.
+ */
+campaignsRouter.get(
+  "/",
+  asyncHandler(async (req: Request, res: Response) => {
+    const campaigns = await forWorkspace(req.workspaceId!).campaign.findMany({
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.status(200).json(campaigns);
+  })
+);
+
+/**
  * POST /
  * Creates a campaign (draft only, does not dispatch).
  */

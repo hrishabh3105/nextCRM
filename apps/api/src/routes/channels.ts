@@ -4,6 +4,7 @@ import {
   forWorkspace,
   validateOrThrow,
   encryptToken,
+  verifyPhoneNumber,
 } from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
@@ -38,10 +39,38 @@ channelsRouter.post(
       } as any,
     });
 
-    // Explicitly exclude accessTokenEnc from response
-    const { accessTokenEnc: _stripped, ...safeChannel } = channel;
+    let currentChannel = channel;
+    let verificationWarning: string | undefined = undefined;
 
-    res.status(201).json(safeChannel);
+    if (validatedData.phoneNumberId) {
+      const isVerified = await verifyPhoneNumber({
+        accessToken,
+        phoneNumberId: validatedData.phoneNumberId,
+      });
+
+      if (isVerified) {
+        currentChannel = await forWorkspace(req.workspaceId!).channel.update({
+          where: { id: channel.id },
+          data: {
+            status: "connected",
+          },
+        });
+      } else {
+        verificationWarning =
+          "Could not verify this channel with Meta. Double check your credentials.";
+      }
+    } else {
+      verificationWarning =
+        "Could not verify this channel with Meta. Double check your credentials.";
+    }
+
+    // Explicitly exclude accessTokenEnc from response
+    const { accessTokenEnc: _stripped, ...safeChannel } = currentChannel;
+
+    res.status(201).json({
+      ...safeChannel,
+      ...(verificationWarning ? { verificationWarning } : {}),
+    });
   })
 );
 
@@ -96,8 +125,68 @@ channelsRouter.patch(
       },
     });
 
+    let currentChannel = updatedChannel;
+    let verificationWarning: string | undefined = undefined;
+
+    if (channel.phoneNumberId) {
+      const isVerified = await verifyPhoneNumber({
+        accessToken,
+        phoneNumberId: channel.phoneNumberId,
+      });
+
+      if (isVerified) {
+        currentChannel = await forWorkspace(req.workspaceId!).channel.update({
+          where: { id: channel.id },
+          data: {
+            status: "connected",
+          },
+        });
+      } else {
+        verificationWarning =
+          "Could not verify this channel with Meta. Double check your credentials.";
+      }
+    } else {
+      verificationWarning =
+        "Could not verify this channel with Meta. Double check your credentials.";
+    }
+
+    const { accessTokenEnc: _stripped, ...safeChannel } = currentChannel;
+
+    res.status(200).json({
+      ...safeChannel,
+      ...(verificationWarning ? { verificationWarning } : {}),
+    });
+  })
+);
+
+/**
+ * POST /:id/disconnect
+ * Soft-deactivates an existing channel in the workspace without deleting foreign-key linked data.
+ * Sets status to "disconnected" and clears accessTokenEnc to null.
+ * CRITICAL: accessTokenEnc is explicitly stripped out and NEVER returned to the client.
+ */
+channelsRouter.post(
+  "/:id/disconnect",
+  asyncHandler(async (req: Request, res: Response) => {
+    const channel = await forWorkspace(req.workspaceId!).channel.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!channel) {
+      throw new ApiError(404, "Channel not found");
+    }
+
+    const updatedChannel = await forWorkspace(req.workspaceId!).channel.update({
+      where: { id: req.params.id },
+      data: {
+        status: "disconnected",
+        accessTokenEnc: null,
+      },
+    });
+
     const { accessTokenEnc: _stripped, ...safeChannel } = updatedChannel;
 
     res.status(200).json(safeChannel);
   })
 );
+

@@ -8,13 +8,15 @@ import { asyncHandler } from "../middleware/asyncHandler";
 import { hashPassword, comparePassword } from "../utils/password";
 import { issueAccessToken } from "../utils/jwt";
 import { generateRefreshToken, hashToken } from "../utils/refreshToken";
+import { setAuthCookies, clearAuthCookies } from "../utils/cookies";
+import { requireAuth } from "../middleware/auth";
 
 export const authRouter = Router();
 
 /**
  * POST /signup
  * Creates Workspace + User + Membership(role=owner) atomically,
- * issues short-lived accessToken and 30-day refreshToken.
+ * issues short-lived accessToken and 30-day refreshToken via httpOnly cookies.
  */
 authRouter.post(
   "/signup",
@@ -82,10 +84,9 @@ authRouter.post(
       },
     });
 
-    // BREAKING CHANGE: Renamed "token" field to "accessToken" for clarity now that refresh tokens are returned alongside access tokens.
+    setAuthCookies(res, accessToken, rawRefreshToken);
+
     res.status(201).json({
-      accessToken,
-      refreshToken: rawRefreshToken,
       workspace: {
         id: workspace.id,
         name: workspace.name,
@@ -96,7 +97,7 @@ authRouter.post(
 
 /**
  * POST /login
- * Authenticates user credentials and returns a workspace-scoped accessToken and refreshToken.
+ * Authenticates user credentials and sets workspace-scoped accessToken and refreshToken cookies.
  */
 authRouter.post(
   "/login",
@@ -159,10 +160,9 @@ authRouter.post(
       role: m.role,
     }));
 
-    // BREAKING CHANGE: Renamed "token" field to "accessToken" for clarity now that refresh tokens are returned alongside access tokens.
+    setAuthCookies(res, accessToken, rawRefreshToken);
+
     res.status(200).json({
-      accessToken,
-      refreshToken: rawRefreshToken,
       workspaces,
     });
   })
@@ -170,16 +170,16 @@ authRouter.post(
 
 /**
  * POST /refresh
- * Validates the incoming refresh token, detects potential token reuse,
- * rotates the refresh token atomically, and issues a new access + refresh token pair.
+ * Validates the incoming refresh token from httpOnly cookie, detects potential token reuse,
+ * rotates the refresh token atomically, and sets a new access + refresh token cookie pair.
  */
 authRouter.post(
   "/refresh",
   asyncHandler(async (req: Request, res: Response) => {
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies?.refreshToken;
 
     if (!refreshToken) {
-      throw new ApiError(400, "refreshToken is required");
+      throw new ApiError(401, "No refresh token provided");
     }
 
     const incomingHash = hashToken(refreshToken);
@@ -269,43 +269,88 @@ authRouter.post(
       role: primaryMembership.role as "owner" | "agent",
     });
 
-    res.status(200).json({
-      accessToken,
-      refreshToken: newRawRefreshToken,
-    });
+    setAuthCookies(res, accessToken, newRawRefreshToken);
+
+    res.status(200).json({ success: true });
   })
 );
 
 /**
  * POST /logout
- * Revokes the provided refresh token.
+ * Revokes the refresh token provided in the httpOnly cookie and clears auth cookies.
  * This endpoint is idempotent — if the token is not found or already revoked,
- * it returns success anyway without erroring.
+ * it clears cookies and returns success anyway without erroring.
  */
 authRouter.post(
   "/logout",
   asyncHandler(async (req: Request, res: Response) => {
-    const { refreshToken } = req.body;
+    const refreshToken = req.cookies?.refreshToken;
 
-    if (!refreshToken) {
-      throw new ApiError(400, "refreshToken is required");
-    }
+    if (refreshToken) {
+      const incomingHash = hashToken(refreshToken);
 
-    const incomingHash = hashToken(refreshToken);
-
-    const tokenRecord = await prisma.refreshToken.findUnique({
-      where: { tokenHash: incomingHash },
-    });
-
-    if (tokenRecord && !tokenRecord.revokedAt) {
-      await prisma.refreshToken.update({
-        where: { id: tokenRecord.id },
-        data: {
-          revokedAt: new Date(),
-        },
+      const tokenRecord = await prisma.refreshToken.findUnique({
+        where: { tokenHash: incomingHash },
       });
+
+      if (tokenRecord && !tokenRecord.revokedAt) {
+        await prisma.refreshToken.update({
+          where: { id: tokenRecord.id },
+          data: {
+            revokedAt: new Date(),
+          },
+        });
+      }
     }
+
+    clearAuthCookies(res);
 
     res.status(200).json({ message: "Logged out" });
   })
 );
+
+/**
+ * GET /me
+ * Returns authenticated user info and active workspace details for session hydration.
+ */
+authRouter.get(
+  "/me",
+  requireAuth,
+  asyncHandler(async (req: Request, res: Response) => {
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { id: true, email: true },
+    });
+
+    const membership = await prisma.membership.findUnique({
+      where: {
+        userId_workspaceId: {
+          userId: req.userId!,
+          workspaceId: req.workspaceId!,
+        },
+      },
+      include: {
+        workspace: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    if (!user || !membership) {
+      throw new ApiError(404, "User or workspace membership not found");
+    }
+
+    res.status(200).json({
+      user: {
+        id: user.id,
+        email: user.email,
+      },
+      workspace: {
+        id: membership.workspace.id,
+        name: membership.workspace.name,
+        role: membership.role,
+      },
+    });
+  })
+);
+

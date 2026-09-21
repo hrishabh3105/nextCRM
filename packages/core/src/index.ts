@@ -6,3 +6,4 @@ export * from "./queue";
 export * from "./services/metaClient";
 export * from "./services/costTracker";
 export * from "./tokenEncryption";
+export * from "./services/shopifyClient";

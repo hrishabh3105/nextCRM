@@ -195,3 +195,140 @@ export async function handleInboundWebhookPayload(payload: any): Promise<void> {
     }
   }
 }
+
+/**
+ * Maps Meta's uppercase template status events to our internal lowercase status values.
+ * Matches getTemplateStatus() in metaClient.ts.
+ */
+function mapMetaTemplateStatus(rawStatus: string): string {
+  const normalized = String(rawStatus || "").toUpperCase();
+  if (normalized === "APPROVED") {
+    return "approved";
+  } else if (normalized === "REJECTED") {
+    return "rejected";
+  } else if (normalized === "PENDING") {
+    return "submitted";
+  } else if (normalized) {
+    return normalized.toLowerCase();
+  }
+  return "submitted";
+}
+
+/**
+ * Handles incoming Meta WhatsApp message_template_status_update webhook payloads.
+ *
+ * Scoping pattern:
+ * 1. Resolves Channel via RAW unscoped prisma client using wabaId from entry.id.
+ * 2. Derives workspaceId from the channel.
+ * 3. Uses forWorkspace(workspaceId) for all Template lookups and updates.
+ */
+export async function handleTemplateStatusUpdate(payload: any): Promise<void> {
+  const entries = payload?.entry ?? [];
+
+  for (const entry of entries) {
+    const wabaId = entry.id;
+    if (!wabaId) {
+      continue;
+    }
+
+    const changes = entry.changes ?? [];
+
+    for (const change of changes) {
+      if (change.field !== "message_template_status_update") {
+        continue;
+      }
+
+      const value = change.value ?? {};
+      const rawTemplateId = value.message_template_id;
+      if (!rawTemplateId) {
+        continue;
+      }
+
+      const providerTemplateId = String(rawTemplateId);
+      const rawEvent = value.event;
+      const rawCategory = value.message_template_category;
+
+      // -----------------------------------------------------------------------
+      // RAW UNSCOPED QUERY:
+      // Look up Channel via raw prisma client using wabaId to determine workspace.
+      // -----------------------------------------------------------------------
+      const channel = await prisma.channel.findFirst({
+        where: { wabaId },
+      });
+
+      if (!channel) {
+        console.warn(`[webhook] No channel found for wabaId: ${wabaId}`);
+        continue;
+      }
+
+      // -----------------------------------------------------------------------
+      // TENANT-SCOPED CLIENT:
+      // Scoped using workspaceId derived from Channel.
+      // -----------------------------------------------------------------------
+      const db = forWorkspace(channel.workspaceId);
+
+      let template = await db.template.findFirst({
+        where: { providerTemplateId },
+      });
+
+      // Fallback by providerName if providerTemplateId was not set yet
+      if (!template && value.message_template_name) {
+        template = await db.template.findFirst({
+          where: {
+            providerName: value.message_template_name,
+            channelId: channel.id,
+          },
+        });
+      }
+
+      if (!template) {
+        console.warn(
+          `[webhook] No template found in workspace ${channel.workspaceId} for providerTemplateId: ${providerTemplateId}`
+        );
+        continue;
+      }
+
+      const updateData: Record<string, any> = {};
+
+      // Ensure providerTemplateId is stored
+      if (!template.providerTemplateId) {
+        updateData.providerTemplateId = providerTemplateId;
+      }
+
+      // Status mapping and rejection reason
+      if (rawEvent) {
+        const mappedStatus = mapMetaTemplateStatus(rawEvent);
+        if (mappedStatus !== template.status) {
+          updateData.status = mappedStatus;
+        }
+
+        if (mappedStatus === "rejected") {
+          const reason =
+            value.reason || value.rejected_reason || value.rejection_reason || null;
+          if (reason) {
+            updateData.rejectionReason = String(reason);
+          }
+        }
+      }
+
+      // Category update and recategorization tracking
+      if (rawCategory) {
+        const newCategory = String(rawCategory).toLowerCase();
+        if (newCategory !== template.category) {
+          console.log(
+            `[webhook] Template "${template.providerName}" (id: ${template.id}) recategorized from "${template.category}" to "${newCategory}" by Meta.`
+          );
+          updateData.previousCategory = template.category;
+          updateData.category = newCategory;
+        }
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await db.template.update({
+          where: { id: template.id },
+          data: updateData as any,
+        });
+      }
+    }
+  }
+}

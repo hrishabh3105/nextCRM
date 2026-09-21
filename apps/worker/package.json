@@ -2,6 +2,8 @@
   "name": "@nextcrm/worker",
   "version": "1.0.0",
   "private": true,
+  "main": "src/services/journeyStepProcessor.ts",
+  "types": "src/services/journeyStepProcessor.ts",
   "scripts": {
     "dev": "tsx watch src/index.ts"
   },

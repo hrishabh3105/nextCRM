@@ -20,6 +20,11 @@ model Workspace {
   campaigns     Campaign[]
   conversations Conversation[]
   messages      Message[]
+  storeConnections StoreConnection[]
+  orders           Order[]
+  carts            Cart[]
+  journeys         Journey[]
+  journeyRuns      JourneyRun[]
 
   @@map("workspaces")
 }
@@ -82,6 +87,9 @@ model Contact {
   campaignRecipients CampaignRecipient[]
   conversations      Conversation[]
   messages           Message[]
+  orders             Order[]
+  carts              Cart[]
+  journeyRuns        JourneyRun[]
 
   @@unique([workspaceId, phone])
   @@index([workspaceId])
@@ -118,6 +126,7 @@ model Template {
   providerTemplateId String?  @map("provider_template_id")
   language           String   @default("en_US")
   category           String
+  previousCategory   String?  @map("previous_category")
   bodyPreview        String   @map("body_preview")
   variableCount      Int      @default(0) @map("variable_count")
   status             String   @default("draft")
@@ -245,4 +254,110 @@ model MessageCost {
   @@map("message_costs")
 }
 
+model StoreConnection {
+  id             String   @id @default(cuid())
+  workspaceId    String   @map("workspace_id")
+  shopDomain     String   @unique @map("shop_domain")
+  accessTokenEnc String   @map("access_token_enc")
+  apiSecretEnc   String?  @map("api_secret_enc")
+  status         String   @default("pending")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@index([workspaceId])
+  @@map("store_connections")
+}
+
+model Order {
+  id             String   @id @default(cuid())
+  workspaceId    String   @map("workspace_id")
+  contactId      String?  @map("contact_id")
+  shopifyOrderId String   @map("shopify_order_id")
+  status         String
+  totalPrice     Decimal  @db.Decimal(10, 2) @map("total_price")
+  currency       String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  contact   Contact?  @relation(fields: [contactId], references: [id])
+
+  @@unique([workspaceId, shopifyOrderId])
+  @@index([workspaceId])
+  @@map("orders")
+}
+
+model Cart {
+  id             String   @id @default(cuid())
+  workspaceId    String   @map("workspace_id")
+  contactId      String?  @map("contact_id")
+  shopifyCartId  String   @map("shopify_cart_id")
+  status         String   @default("active")
+  totalPrice     Decimal  @db.Decimal(10, 2) @map("total_price")
+  lastActivityAt DateTime @map("last_activity_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  contact   Contact?  @relation(fields: [contactId], references: [id])
+
+  @@unique([workspaceId, shopifyCartId])
+  @@index([workspaceId])
+  @@map("carts")
+}
+
+model Journey {
+  id               String   @id @default(cuid())
+  workspaceId      String   @map("workspace_id")
+  name             String
+  triggerEvent     String   @map("trigger_event")
+  status           String   @default("draft")
+  currentVersionId String?  @map("current_version_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id])
+  versions  JourneyVersion[]
+  runs      JourneyRun[]
+
+  @@index([workspaceId])
+  @@map("journeys")
+}
+
+model JourneyVersion {
+  id            String   @id @default(cuid())
+  journeyId     String   @map("journey_id")
+  versionNumber Int      @map("version_number")
+  steps         Json
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  journey Journey      @relation(fields: [journeyId], references: [id])
+  runs    JourneyRun[]
+
+  @@unique([journeyId, versionNumber])
+  @@map("journey_versions")
+}
+
+model JourneyRun {
+  id               String    @id @default(cuid())
+  workspaceId      String    @map("workspace_id")
+  journeyId        String    @map("journey_id")
+  journeyVersionId String    @map("journey_version_id")
+  contactId        String    @map("contact_id")
+  triggerContextId String?   @map("trigger_context_id")
+  currentStepIndex Int       @default(0) @map("current_step_index")
+  status           String    @default("running")
+  nextStepAt       DateTime? @map("next_step_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  workspace      Workspace      @relation(fields: [workspaceId], references: [id])
+  journey        Journey        @relation(fields: [journeyId], references: [id])
+  journeyVersion JourneyVersion @relation(fields: [journeyVersionId], references: [id])
+  contact        Contact        @relation(fields: [contactId], references: [id])
+
+  @@index([workspaceId])
+  @@index([status, nextStepAt])
+  @@map("journey_runs")
+}
 

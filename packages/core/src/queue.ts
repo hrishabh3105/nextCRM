@@ -21,3 +21,4 @@ export const redisConnection = {
  */
 export const CAMPAIGN_DISPATCH_QUEUE = "campaign-dispatch";
 export const SEND_MESSAGE_QUEUE = "send-message";
+export const JOURNEY_TICK_QUEUE = "journey-tick";

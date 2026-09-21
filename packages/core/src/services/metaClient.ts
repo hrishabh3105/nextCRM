@@ -231,3 +231,29 @@ export async function sendFreeformMessage(params: {
     providerMessageId,
   };
 }
+
+/**
+ * Verifies a WhatsApp Phone Number ID with Meta Graph API.
+ * Soft check — returns true if valid, false on any failure (never throws).
+ * GET https://graph.facebook.com/v20.0/{phoneNumberId}
+ */
+export async function verifyPhoneNumber(params: {
+  accessToken: string;
+  phoneNumberId: string;
+}): Promise<boolean> {
+  const { accessToken, phoneNumberId } = params;
+
+  try {
+    const response = await fetch(`${META_GRAPH_BASE_URL}/${phoneNumberId}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+

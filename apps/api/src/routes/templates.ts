@@ -19,6 +19,21 @@ import {
 export const templatesRouter = Router();
 
 /**
+ * GET /
+ * Lists all templates for the authenticated workspace.
+ */
+templatesRouter.get(
+  "/",
+  asyncHandler(async (req: Request, res: Response) => {
+    const templates = await forWorkspace(req.workspaceId!).template.findMany({
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.status(200).json(templates);
+  })
+);
+
+/**
  * POST /
  * Creates a template (local draft only, does NOT call Meta).
  */

@@ -16,14 +16,12 @@ export const requireAuth = (
   res: Response,
   next: NextFunction
 ): void => {
-  const authHeader = req.headers.authorization;
+  const token = req.cookies?.accessToken;
 
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Missing or malformed Authorization header" });
+  if (!token) {
+    res.status(401).json({ error: "Missing access token" });
     return;
   }
-
-  const token = authHeader.split(" ")[1];
 
   try {
     const payload = verifyToken(token);
