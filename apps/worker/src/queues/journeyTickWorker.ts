@@ -1,20 +1,14 @@
 import "dotenv/config";
-import { Worker, Job, Queue } from "bullmq";
-import { JOURNEY_TICK_QUEUE, redisConnection } from "@nextcrm/core";
-import { processJourneyStep } from "../services/journeyStepProcessor";
+import { Worker, Job } from "bullmq";
+import {
+  JOURNEY_TICK_QUEUE,
+  redisConnection,
+  journeyTickQueue,
+  JourneyTickJobData,
+  processJourneyStep,
+} from "@nextcrm/core";
 
-export interface JourneyTickJobData {
-  runId: string;
-  workspaceId: string;
-}
-
-/**
- * BullMQ Queue for JOURNEY_TICK_QUEUE.
- * Used to schedule delayed tick jobs for journey 'wait' steps.
- */
-export const journeyTickQueue = new Queue<JourneyTickJobData>(JOURNEY_TICK_QUEUE, {
-  connection: redisConnection,
-});
+export { journeyTickQueue, JourneyTickJobData };
 
 /**
  * BullMQ Worker for JOURNEY_TICK_QUEUE.

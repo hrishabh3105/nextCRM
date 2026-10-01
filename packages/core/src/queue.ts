@@ -1,3 +1,5 @@
+import { Queue } from "bullmq";
+
 /**
  * Redis connection configuration.
  * Minimal shared configuration object built from process.env.REDIS_URL.
@@ -22,3 +24,16 @@ export const redisConnection = {
 export const CAMPAIGN_DISPATCH_QUEUE = "campaign-dispatch";
 export const SEND_MESSAGE_QUEUE = "send-message";
 export const JOURNEY_TICK_QUEUE = "journey-tick";
+
+export interface JourneyTickJobData {
+  runId: string;
+  workspaceId: string;
+}
+
+/**
+ * BullMQ Queue for JOURNEY_TICK_QUEUE.
+ * Used to schedule delayed tick jobs for journey 'wait' steps.
+ */
+export const journeyTickQueue = new Queue<JourneyTickJobData>(JOURNEY_TICK_QUEUE, {
+  connection: redisConnection,
+});

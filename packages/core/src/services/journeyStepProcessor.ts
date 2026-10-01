@@ -1,10 +1,8 @@
-import {
-  forWorkspace,
-  sendTemplateMessage,
-  decryptToken,
-  recordMessageCost,
-} from "@nextcrm/core";
-import { journeyTickQueue } from "../queues/journeyTickWorker";
+import { forWorkspace } from "../tenantScope";
+import { decryptToken } from "../tokenEncryption";
+import { sendTemplateMessage } from "./metaClient";
+import { recordMessageCost } from "./costTracker";
+import { journeyTickQueue } from "../queue";
 
 export interface JourneyStep {
   type: "wait" | "send_message" | "condition" | "exit" | string;

@@ -1,4 +1,4 @@
-import { forWorkspace } from "@nextcrm/core";
+import { forWorkspace, startMatchingJourneys } from "@nextcrm/core";
 import { normalizePhoneE164 } from "../utils/phone";
 
 /**
@@ -21,6 +21,7 @@ async function resolveOrCreateContact(
   }
 
   const normalizedPhone = normalizePhoneE164(String(rawPhone));
+  console.log("[DEBUG] rawPhone extracted:", rawPhone, "| normalized:", normalizedPhone);
   if (!normalizedPhone) {
     return null;
   }
@@ -80,6 +81,8 @@ export async function handleShopifyOrder(
   payload: any,
   workspaceId: string
 ): Promise<void> {
+  console.log("[DEBUG] Full order payload:", JSON.stringify(payload, null, 2));
+
   if (!payload || !payload.id) {
     console.warn(`[shopify-webhook] Received order payload without id, skipping`);
     return;
@@ -149,8 +152,9 @@ export async function handleShopifyCheckout(
   const db = forWorkspace(workspaceId);
   const contactId = await resolveOrCreateContact(db, payload);
 
+  let cart: any = null;
   try {
-    await db.cart.upsert({
+    cart = await db.cart.upsert({
       where: {
         workspaceId_shopifyCartId: {
           workspaceId,
@@ -176,11 +180,32 @@ export async function handleShopifyCheckout(
       console.warn(
         `[shopify-webhook] Concurrent race condition on cart upsert (P2002): shopifyCartId=${shopifyCartId}`
       );
+      cart = await db.cart.findFirst({
+        where: { shopifyCartId },
+      });
     } else {
       console.error(
         `[shopify-webhook] Error upserting cart ${shopifyCartId}:`,
         err
       );
     }
+  }
+
+  if (contactId && cart?.id) {
+    /**
+     * Note on cart abandonment trigger timing:
+     * For THIS pass, we trigger on checkouts/create OR checkouts/update firing at all —
+     * we are NOT yet distinguishing "just started checkout" from "genuinely abandoned
+     * after N minutes of inactivity" at the webhook level. That distinction is exactly
+     * what the journey's own `wait` step (45 minutes) plus `condition` step
+     * (order exists?) already handles — the trigger just needs to start the clock,
+     * the journey itself determines whether it was truly abandoned.
+     */
+    await startMatchingJourneys({
+      workspaceId,
+      triggerEvent: "cart_abandoned",
+      contactId,
+      triggerContextId: cart.id,
+    });
   }
 }

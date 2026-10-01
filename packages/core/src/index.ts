@@ -7,3 +7,5 @@ export * from "./services/metaClient";
 export * from "./services/costTracker";
 export * from "./tokenEncryption";
 export * from "./services/shopifyClient";
+export * from "./services/journeyStepProcessor";
+export * from "./services/journeyTrigger";

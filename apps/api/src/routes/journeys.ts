@@ -1,6 +1,5 @@
 import { Router, Request, Response } from "express";
-import { ApiError, forWorkspace } from "@nextcrm/core";
-import { processJourneyStep } from "@nextcrm/worker";
+import { ApiError, forWorkspace, processJourneyStep } from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 
 export const journeysRouter = Router();

@@ -358,6 +358,11 @@ model JourneyRun {
 
   @@index([workspaceId])
   @@index([status, nextStepAt])
+  // NOTE: a partial unique index (journey_runs_active_unique) exists
+  // directly in the database via a raw migration — this index is NOT
+  // representable in Prisma's schema language and is intentionally
+  // absent from this model definition. Do not add an @@index or
+  // @@unique attempting to represent it.
   @@map("journey_runs")
 }
 
