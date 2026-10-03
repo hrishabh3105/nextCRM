@@ -55,13 +55,56 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
       return;
     }
 
-    // 2. Fetch all opted-in contacts in this workspace
-    const contacts = await db.contact.findMany({
-      where: {
-        optedInAt: {
-          not: null,
-        },
+    // 2. Fetch contacts matching campaign segmentation
+    // Backward-compatibility guarantee:
+    // Every campaign created before this feature has segment: null, which
+    // must resolve identically to { type: "all" } (all opted-in contacts).
+    const segment = campaign.segment as
+      | { type: "all" }
+      | { type: "contact_ids"; contactIds: string[] }
+      | {
+          type: "filter";
+          conditions: Array<{
+            key: string;
+            operator: "equals";
+            value: string | number | boolean;
+          }>;
+        }
+      | null;
+
+    let contactWhere: any = {
+      optedInAt: {
+        not: null,
       },
+    };
+
+    if (segment && typeof segment === "object" && "type" in segment) {
+      if (segment.type === "contact_ids") {
+        contactWhere = {
+          id: {
+            in: segment.contactIds,
+          },
+          optedInAt: {
+            not: null,
+          },
+        };
+      } else if (segment.type === "filter") {
+        contactWhere = {
+          optedInAt: {
+            not: null,
+          },
+          AND: segment.conditions.map((c) => ({
+            attributes: {
+              path: [c.key],
+              equals: c.value,
+            },
+          })),
+        };
+      }
+    }
+
+    const contacts = await db.contact.findMany({
+      where: contactWhere,
     });
 
     // If no opted-in contacts found, mark completed immediately

@@ -15,7 +15,22 @@ import {
   Send,
   Radio,
   HelpCircle,
+  Trash2,
+  ExternalLink,
+  Phone,
+  CornerDownLeft,
+  Smartphone,
+  CheckCheck,
+  Image as ImageIcon,
+  Upload,
 } from "lucide-react";
+
+export interface TemplateButton {
+  type: "QUICK_REPLY" | "URL" | "PHONE_NUMBER";
+  text: string;
+  url?: string;
+  phoneNumber?: string;
+}
 
 export interface Template {
   id: string;
@@ -25,8 +40,16 @@ export interface Template {
   language: string;
   category: "marketing" | "utility" | "authentication" | string;
   previousCategory?: string | null;
+  headerType?: "TEXT" | "IMAGE" | string | null;
+  headerText?: string | null;
+  headerMediaHandle?: string | null;
   bodyPreview: string;
+  footerText?: string | null;
+  buttons?: TemplateButton[] | null;
   variableCount: number;
+  placeholders?: string[] | null;
+  positionalPlaceholders?: string[] | null;
+  examples?: Record<string, string> | null;
   status: "draft" | "submitted" | "approved" | "rejected" | string;
   rejectionReason?: string | null;
   createdAt: string;
@@ -41,6 +64,13 @@ export interface Channel {
   phoneNumberId?: string | null;
   phoneNumber?: string | null;
   status: string;
+}
+
+interface ButtonEditorRow {
+  type: "QUICK_REPLY" | "URL" | "PHONE_NUMBER";
+  text: string;
+  url: string;
+  phoneNumber: string;
 }
 
 function formatDate(dateStr: string): string {
@@ -77,7 +107,17 @@ export const TemplatesPage: React.FC = () => {
   const [name, setName] = useState<string>("");
   const [language, setLanguage] = useState<string>("en_US");
   const [category, setCategory] = useState<"marketing" | "utility" | "authentication">("utility");
+  const [headerType, setHeaderType] = useState<"TEXT" | "IMAGE">("TEXT");
+  const [headerText, setHeaderText] = useState<string>("");
+  const [headerMediaHandle, setHeaderMediaHandle] = useState<string | null>(null);
+  const [headerImageFile, setHeaderImageFile] = useState<File | null>(null);
+  const [headerImagePreviewUrl, setHeaderImagePreviewUrl] = useState<string | null>(null);
+  const [headerUploadLoading, setHeaderUploadLoading] = useState<boolean>(false);
+  const [headerUploadError, setHeaderUploadError] = useState<string | null>(null);
   const [body, setBody] = useState<string>("");
+  const [footerText, setFooterText] = useState<string>("");
+  const [buttons, setButtons] = useState<ButtonEditorRow[]>([]);
+  const [examples, setExamples] = useState<Record<string, string>>({});
   const [createLoading, setCreateLoading] = useState<boolean>(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -130,6 +170,26 @@ export const TemplatesPage: React.FC = () => {
     return map;
   }, [channels]);
 
+  // Extract named placeholders in body text
+  const detectedPlaceholders = useMemo(() => {
+    const matches = body.match(/\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g) ?? [];
+    const seen: string[] = [];
+    for (const m of matches) {
+      const p = m.slice(2, -2);
+      if (!seen.includes(p)) seen.push(p);
+    }
+    return seen;
+  }, [body]);
+
+  // Live preview body text with placeholder tokens replaced by their example values
+  const previewBody = useMemo(() => {
+    if (!body) return "";
+    return body.replace(/\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g, (_match, placeholderName) => {
+      const ex = examples[placeholderName];
+      return ex && ex.trim().length > 0 ? ex.trim() : `{{${placeholderName}}}`;
+    });
+  }, [body, examples]);
+
   // Open modal and preselect first connected channel if available
   const handleOpenCreateModal = () => {
     setCreateError(null);
@@ -137,8 +197,71 @@ export const TemplatesPage: React.FC = () => {
     setName("");
     setLanguage("en_US");
     setCategory("utility");
+    setHeaderType("TEXT");
+    setHeaderText("");
+    setHeaderMediaHandle(null);
+    setHeaderImageFile(null);
+    if (headerImagePreviewUrl) {
+      URL.revokeObjectURL(headerImagePreviewUrl);
+      setHeaderImagePreviewUrl(null);
+    }
+    setHeaderUploadLoading(false);
+    setHeaderUploadError(null);
     setBody("");
+    setFooterText("");
+    setButtons([]);
+    setExamples({});
     setIsCreateModalOpen(true);
+  };
+
+  // Immediate upload of header image to Meta Resumable Upload API
+  const handleHeaderFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!channelId) {
+      setHeaderUploadError("Please select a connected channel above before uploading an image.");
+      return;
+    }
+
+    if (!["image/jpeg", "image/png"].includes(file.type)) {
+      setHeaderUploadError("Invalid file type. Only JPEG and PNG images are supported.");
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setHeaderUploadError("Image file size exceeds 5MB limit.");
+      return;
+    }
+
+    setHeaderUploadError(null);
+    if (headerImagePreviewUrl) {
+      URL.revokeObjectURL(headerImagePreviewUrl);
+    }
+    const previewUrl = URL.createObjectURL(file);
+    setHeaderImagePreviewUrl(previewUrl);
+    setHeaderImageFile(file);
+    setHeaderUploadLoading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("channelId", channelId);
+
+      const result = await api.post<{ handle: string }>("/api/v1/templates/upload-media", formData);
+      setHeaderMediaHandle(result.handle);
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+          ? err.message
+          : "Failed to upload image to Meta.";
+      setHeaderUploadError(msg);
+      setHeaderMediaHandle(null);
+    } finally {
+      setHeaderUploadLoading(false);
+    }
   };
 
   // Submit new template
@@ -161,9 +284,98 @@ export const TemplatesPage: React.FC = () => {
       return;
     }
 
+    const trimmedHeader = headerText.trim();
+    if (headerType === "TEXT" && trimmedHeader) {
+      if (trimmedHeader.length > 60) {
+        setCreateError("Header must be 60 characters or fewer.");
+        return;
+      }
+      if (/\{\{.*\}\}/.test(trimmedHeader)) {
+        setCreateError("Header cannot contain variables in this version.");
+        return;
+      }
+    }
+
+    if (headerType === "IMAGE") {
+      if (headerUploadLoading) {
+        setCreateError("Please wait for the header image to finish uploading to Meta.");
+        return;
+      }
+      if (!headerMediaHandle) {
+        setCreateError("Please select and upload a header image.");
+        return;
+      }
+    }
+
     if (!body.trim()) {
       setCreateError("Template body is required.");
       return;
+    }
+
+    const trimmedFooter = footerText.trim();
+    if (trimmedFooter) {
+      if (trimmedFooter.length > 60) {
+        setCreateError("Footer must be 60 characters or fewer.");
+        return;
+      }
+      if (/\{\{.*\}\}/.test(trimmedFooter)) {
+        setCreateError("Footer cannot contain variables.");
+        return;
+      }
+    }
+
+    // Validate placeholder examples if placeholders exist
+    if (detectedPlaceholders.length > 0) {
+      for (const p of detectedPlaceholders) {
+        if (!examples[p] || !examples[p].trim()) {
+          setCreateError(`Please provide an example value for placeholder {{${p}}}.`);
+          return;
+        }
+      }
+    }
+
+    // Validate buttons
+    if (buttons.length > 3) {
+      setCreateError("A maximum of 3 buttons is supported in this version.");
+      return;
+    }
+
+    const formattedButtons: TemplateButton[] = [];
+    for (let i = 0; i < buttons.length; i++) {
+      const btn = buttons[i];
+      const text = btn.text.trim();
+      if (!text) {
+        setCreateError(`Button #${i + 1} text is required.`);
+        return;
+      }
+      if (text.length > 25) {
+        setCreateError(`Button #${i + 1} text must be 25 characters or fewer.`);
+        return;
+      }
+
+      if (btn.type === "QUICK_REPLY") {
+        formattedButtons.push({ type: "QUICK_REPLY", text });
+      } else if (btn.type === "URL") {
+        const url = btn.url.trim();
+        if (!url) {
+          setCreateError(`Button #${i + 1} URL is required.`);
+          return;
+        }
+        try {
+          new URL(url);
+        } catch {
+          setCreateError(`Button #${i + 1} URL must be a valid URL (including https://).`);
+          return;
+        }
+        formattedButtons.push({ type: "URL", text, url });
+      } else if (btn.type === "PHONE_NUMBER") {
+        const phone = btn.phoneNumber.trim();
+        if (!phone) {
+          setCreateError(`Button #${i + 1} phone number is required.`);
+          return;
+        }
+        formattedButtons.push({ type: "PHONE_NUMBER", text, phoneNumber: phone });
+      }
     }
 
     setCreateLoading(true);
@@ -175,7 +387,13 @@ export const TemplatesPage: React.FC = () => {
         name: trimmedName,
         language: language.trim() || "en_US",
         category,
+        headerType,
+        headerText: headerType === "TEXT" && trimmedHeader ? trimmedHeader : undefined,
+        headerMediaHandle: headerType === "IMAGE" && headerMediaHandle ? headerMediaHandle : undefined,
         body: body.trim(),
+        footerText: trimmedFooter || undefined,
+        buttons: formattedButtons.length > 0 ? formattedButtons : undefined,
+        examples: detectedPlaceholders.length > 0 ? examples : undefined,
       });
 
       setIsCreateModalOpen(false);
@@ -258,7 +476,9 @@ export const TemplatesPage: React.FC = () => {
       const matchesSearch =
         !searchQuery.trim() ||
         template.providerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        template.bodyPreview.toLowerCase().includes(searchQuery.toLowerCase());
+        template.bodyPreview.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (template.headerText && template.headerText.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (template.footerText && template.footerText.toLowerCase().includes(searchQuery.toLowerCase()));
 
       const matchesStatus =
         selectedStatusFilter === "all" ||
@@ -321,7 +541,7 @@ export const TemplatesPage: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-crm-textSecondary mt-0.5">
-            Create, manage, and submit WhatsApp message templates for Meta approval.
+            Create, manage, and submit rich WhatsApp message templates for Meta approval.
           </p>
         </div>
 
@@ -366,7 +586,7 @@ export const TemplatesPage: React.FC = () => {
             <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-crm-textMuted" />
             <input
               type="text"
-              placeholder="Search templates by name or body..."
+              placeholder="Search templates by name, body, header, or footer..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-8 pr-3 py-1.5 bg-crm-bg border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
@@ -408,7 +628,7 @@ export const TemplatesPage: React.FC = () => {
               No templates yet — create one to start sending messages.
             </h3>
             <p className="text-xs text-crm-textSecondary mt-1 max-w-sm">
-              WhatsApp requires pre-approved templates for business-initiated outbound conversations.
+              WhatsApp requires pre-approved templates with headers, body text, and interactive buttons for outbound conversations.
             </p>
             <button
               onClick={handleOpenCreateModal}
@@ -430,6 +650,7 @@ export const TemplatesPage: React.FC = () => {
               const isActionLoading = !!actionLoading[template.id];
               const inlineError = actionErrors[template.id];
               const statusLower = template.status.toLowerCase();
+              const buttonList = Array.isArray(template.buttons) ? (template.buttons as TemplateButton[]) : [];
 
               return (
                 <div
@@ -522,14 +743,53 @@ export const TemplatesPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Body Preview */}
-                  <div className="p-3 bg-crm-elevated/40 border border-crm-border/70 rounded-lg">
-                    <div className="text-[11px] font-mono text-crm-textSecondary uppercase tracking-wider mb-1">
-                      Body Preview
+                  {/* Rich Template Content Preview */}
+                  <div className="p-3 bg-crm-elevated/40 border border-crm-border/70 rounded-lg space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] font-mono text-crm-textSecondary uppercase tracking-wider">
+                      <span>Message Preview</span>
+                      {buttonList.length > 0 && (
+                        <span className="text-[10px] text-crm-textMuted font-mono">
+                          {buttonList.length} {buttonList.length === 1 ? "button" : "buttons"}
+                        </span>
+                      )}
                     </div>
+
+                    {template.headerType === "IMAGE" ? (
+                      <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono text-purple-700 bg-purple-50 border border-purple-200">
+                        <ImageIcon className="w-2.5 h-2.5" />
+                        <span>IMAGE HEADER</span>
+                      </div>
+                    ) : template.headerText ? (
+                      <div className="text-xs font-bold text-crm-text leading-tight">
+                        {template.headerText}
+                      </div>
+                    ) : null}
+
                     <p className="text-xs text-crm-text whitespace-pre-wrap font-sans leading-relaxed line-clamp-3">
                       {template.bodyPreview}
                     </p>
+
+                    {template.footerText && (
+                      <div className="text-[10px] text-crm-textMuted pt-1 border-t border-crm-border/40">
+                        {template.footerText}
+                      </div>
+                    )}
+
+                    {buttonList.length > 0 && (
+                      <div className="flex items-center gap-1.5 pt-1.5 flex-wrap">
+                        {buttonList.map((b, i) => (
+                          <span
+                            key={i}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-white border border-crm-border text-crm-text font-medium shadow-2xs"
+                          >
+                            {b.type === "QUICK_REPLY" && <CornerDownLeft className="w-2.5 h-2.5 text-[#00A884]" />}
+                            {b.type === "URL" && <ExternalLink className="w-2.5 h-2.5 text-[#00A884]" />}
+                            {b.type === "PHONE_NUMBER" && <Phone className="w-2.5 h-2.5 text-[#00A884]" />}
+                            <span>{b.text}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Recategorization Warning Note */}
@@ -588,10 +848,10 @@ export const TemplatesPage: React.FC = () => {
         )}
       </div>
 
-      {/* Create Template Modal */}
+      {/* Create Template Modal with Live WhatsApp Message Preview */}
       {isCreateModalOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
-          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-lg p-6 relative max-h-[90vh] overflow-y-auto">
+          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-4xl p-6 relative max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-4 border-b border-crm-border">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-md bg-crm-accentSubtle border border-crm-accentBorder flex items-center justify-center text-crm-accent">
@@ -629,128 +889,558 @@ export const TemplatesPage: React.FC = () => {
               </div>
             )}
 
-            <form onSubmit={handleCreateSubmit} className="mt-4 space-y-3.5">
-              {/* Channel Selector */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  Channel <span className="text-red-500">*</span>
-                </label>
-                <select
-                  required
-                  value={channelId}
-                  onChange={(e) => setChannelId(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
-                >
-                  {connectedChannels.length === 0 ? (
-                    <option value="">No connected channels found</option>
-                  ) : (
-                    <>
-                      <option value="">Select a connected channel...</option>
-                      {connectedChannels.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.phoneNumber || c.phoneNumberId || c.id} ({c.provider})
-                        </option>
-                      ))}
-                    </>
-                  )}
-                </select>
-              </div>
-
-              {/* Template Name */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  Template Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. order_shipped_v1"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
-                />
-                <p className="mt-1 text-[11px] text-crm-textMuted flex items-center gap-1">
-                  <HelpCircle className="w-3 h-3 text-crm-textSecondary" />
-                  <span>lowercase letters, numbers, underscores only</span>
-                </p>
-              </div>
-
-              {/* Grid: Language & Category */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* 2-Column Layout: Form on Left, Live Preview on Right */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-4">
+              {/* Form Inputs (7 cols on lg) */}
+              <form onSubmit={handleCreateSubmit} className="lg:col-span-7 space-y-3.5">
+                {/* Channel Selector */}
                 <div>
                   <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                    Language <span className="text-red-500">*</span>
+                    Channel <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    required
+                    value={channelId}
+                    onChange={(e) => setChannelId(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                  >
+                    {connectedChannels.length === 0 ? (
+                      <option value="">No connected channels found</option>
+                    ) : (
+                      <>
+                        <option value="">Select a connected channel...</option>
+                        {connectedChannels.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.phoneNumber || c.phoneNumberId || c.id} ({c.provider})
+                          </option>
+                        ))}
+                      </>
+                    )}
+                  </select>
+                </div>
+
+                {/* Template Name */}
+                <div>
+                  <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
+                    Template Name <span className="text-red-500">*</span>
                   </label>
                   <input
                     type="text"
                     required
-                    placeholder="en_US"
-                    value={language}
-                    onChange={(e) => setLanguage(e.target.value)}
+                    placeholder="e.g. order_shipped_v1"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
                     className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
                   />
+                  <p className="mt-1 text-[11px] text-crm-textMuted flex items-center gap-1">
+                    <HelpCircle className="w-3 h-3 text-crm-textSecondary" />
+                    <span>lowercase letters, numbers, underscores only</span>
+                  </p>
                 </div>
 
+                {/* Grid: Language & Category */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
+                      Language <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="en_US"
+                      value={language}
+                      onChange={(e) => setLanguage(e.target.value)}
+                      className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
+                      Category <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={category}
+                      onChange={(e) =>
+                        setCategory(e.target.value as "marketing" | "utility" | "authentication")
+                      }
+                      className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                    >
+                      <option value="utility">Utility</option>
+                      <option value="marketing">Marketing</option>
+                      <option value="authentication">Authentication</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Header (Text vs Image Toggle) */}
                 <div>
-                  <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                    Category <span className="text-red-500">*</span>
-                  </label>
-                  <select
-                    value={category}
-                    onChange={(e) =>
-                      setCategory(e.target.value as "marketing" | "utility" | "authentication")
-                    }
-                    className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                      Header <span className="text-crm-textMuted font-normal lowercase">(optional)</span>
+                    </label>
+                    <div className="inline-flex p-0.5 bg-crm-elevated rounded-md border border-crm-border">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHeaderType("TEXT");
+                          setHeaderUploadError(null);
+                        }}
+                        className={`px-2.5 py-0.5 text-[11px] font-medium rounded transition-colors flex items-center gap-1 ${
+                          headerType === "TEXT"
+                            ? "bg-white text-crm-text shadow-2xs font-semibold"
+                            : "text-crm-textMuted hover:text-crm-text"
+                        }`}
+                      >
+                        <FileText className="w-3 h-3" />
+                        <span>Text</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHeaderType("IMAGE");
+                          setHeaderText("");
+                        }}
+                        className={`px-2.5 py-0.5 text-[11px] font-medium rounded transition-colors flex items-center gap-1 ${
+                          headerType === "IMAGE"
+                            ? "bg-white text-crm-text shadow-2xs font-semibold"
+                            : "text-crm-textMuted hover:text-crm-text"
+                        }`}
+                      >
+                        <ImageIcon className="w-3 h-3" />
+                        <span>Image</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {headerType === "TEXT" ? (
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] text-crm-textMuted">Title appearing in bold at top of message</span>
+                        <span className={`text-[10px] font-mono ${headerText.length > 60 ? "text-red-500 font-bold" : "text-crm-textMuted"}`}>
+                          {headerText.length}/60
+                        </span>
+                      </div>
+                      <input
+                        type="text"
+                        maxLength={60}
+                        placeholder="e.g. Order Update"
+                        value={headerText}
+                        onChange={(e) => setHeaderText(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                      />
+                      <p className="mt-1 text-[10px] text-crm-textMuted">
+                        Text-only header. Variables are not permitted in header text in this version.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-crm-elevated/40 border border-crm-border rounded-lg space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                          Header Image (JPEG / PNG, max 5MB)
+                        </span>
+                        {headerMediaHandle && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-mono text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Uploaded to Meta</span>
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <label className="relative flex-1 cursor-pointer">
+                          <input
+                            type="file"
+                            accept="image/jpeg,image/png"
+                            disabled={headerUploadLoading}
+                            onChange={handleHeaderFileSelect}
+                            className="sr-only"
+                          />
+                          <div className="w-full px-3 py-2 bg-white border border-dashed border-crm-border hover:border-crm-accent rounded-md flex items-center justify-center gap-2 text-xs text-crm-textSecondary hover:text-crm-text transition-colors">
+                            {headerUploadLoading ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin text-crm-accent" />
+                                <span className="text-crm-accent font-medium">Uploading to Meta...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Upload className="w-4 h-4" />
+                                <span>{headerImageFile ? headerImageFile.name : "Choose JPEG or PNG image..."}</span>
+                              </>
+                            )}
+                          </div>
+                        </label>
+
+                        {headerImagePreviewUrl && (
+                          <div className="relative group w-12 h-12 rounded-md overflow-hidden border border-crm-border bg-gray-100 flex-shrink-0">
+                            <img
+                              src={headerImagePreviewUrl}
+                              alt="Header thumbnail"
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {headerUploadError && (
+                        <p className="text-[11px] text-red-600 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                          <span>{headerUploadError}</span>
+                        </p>
+                      )}
+
+                      <p className="text-[10px] text-crm-textMuted">
+                        Images are uploaded directly to Meta via Resumable Upload API. Media handles expire after ~24 hours.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Template Body */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                      Template Body <span className="text-red-500">*</span>
+                    </label>
+                    <span className={`text-[10px] font-mono ${body.length > 1024 ? "text-red-500 font-bold" : "text-crm-textMuted"}`}>
+                      {body.length}/1024
+                    </span>
+                  </div>
+                  <textarea
+                    required
+                    rows={4}
+                    maxLength={1024}
+                    placeholder="Hello {{name}}, your order {{order_id}} has been shipped and will arrive shortly."
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-sans focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors leading-relaxed"
+                  />
+                  <p className="mt-1 text-[10px] text-crm-textMuted">
+                    Use named placeholders like <code className="font-mono text-crm-text bg-crm-elevated px-1 py-0.5 rounded">&#123;&#123;name&#125;&#125;</code> or <code className="font-mono text-crm-text bg-crm-elevated px-1 py-0.5 rounded">&#123;&#123;order_id&#125;&#125;</code>.
+                  </p>
+                </div>
+
+                {/* Placeholder Example Values (shown only when placeholders detected in body) */}
+                {detectedPlaceholders.length > 0 && (
+                  <div className="p-3 bg-crm-elevated/40 border border-crm-border rounded-lg space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                        Placeholder Examples <span className="text-red-500">*</span>
+                      </span>
+                      <span className="text-[10px] font-mono text-crm-textMuted">Required for Meta Approval</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {detectedPlaceholders.map((p) => (
+                        <div key={p}>
+                          <label className="block text-[10px] font-mono text-crm-textSecondary mb-0.5">
+                            &#123;&#123;{p}&#125;&#125;
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            placeholder={`e.g. John Doe for ${p}`}
+                            value={examples[p] || ""}
+                            onChange={(e) =>
+                              setExamples((prev) => ({ ...prev, [p]: e.target.value }))
+                            }
+                            className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Footer Text (Optional, max 60, no variables) */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                      Footer Text <span className="text-crm-textMuted font-normal lowercase">(optional)</span>
+                    </label>
+                    <span className={`text-[10px] font-mono ${footerText.length > 60 ? "text-red-500 font-bold" : "text-crm-textMuted"}`}>
+                      {footerText.length}/60
+                    </span>
+                  </div>
+                  <input
+                    type="text"
+                    maxLength={60}
+                    placeholder="e.g. Reply STOP to opt out"
+                    value={footerText}
+                    onChange={(e) => setFooterText(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                  />
+                  <p className="mt-1 text-[10px] text-crm-textMuted">
+                    Displayed in subtle small text at the bottom. Variables are not permitted.
+                  </p>
+                </div>
+
+                {/* Buttons Editor (Max 3) */}
+                <div className="space-y-2 pt-2 border-t border-crm-border">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                        Interactive Buttons <span className="text-crm-textMuted font-normal lowercase">(optional)</span>
+                      </label>
+                      <p className="text-[10px] text-crm-textMuted">
+                        Add Quick Replies, web links, or click-to-call buttons (up to 3).
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={buttons.length >= 3}
+                      onClick={() => {
+                        if (buttons.length < 3) {
+                          setButtons((prev) => [
+                            ...prev,
+                            { type: "QUICK_REPLY", text: "", url: "", phoneNumber: "" },
+                          ]);
+                        }
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded bg-crm-surface hover:bg-crm-elevated border border-crm-border text-xs font-medium text-crm-text disabled:opacity-50 transition-colors"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Add button ({buttons.length}/3)</span>
+                    </button>
+                  </div>
+
+                  {buttons.length > 0 && (
+                    <div className="space-y-2.5">
+                      {buttons.map((btn, index) => (
+                        <div
+                          key={index}
+                          className="p-3 bg-crm-elevated/40 border border-crm-border rounded-lg space-y-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-mono font-medium text-crm-textSecondary">
+                              Button #{index + 1}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setButtons((prev) => prev.filter((_, i) => i !== index));
+                              }}
+                              className="text-red-500 hover:text-red-700 p-1 rounded hover:bg-red-50 transition-colors"
+                              title="Remove button"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider mb-0.5">
+                                Type
+                              </label>
+                              <select
+                                value={btn.type}
+                                onChange={(e) => {
+                                  const newType = e.target.value as "QUICK_REPLY" | "URL" | "PHONE_NUMBER";
+                                  setButtons((prev) =>
+                                    prev.map((b, i) => (i === index ? { ...b, type: newType } : b))
+                                  );
+                                }}
+                                className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text focus:outline-none focus:border-crm-accent"
+                              >
+                                <option value="QUICK_REPLY">Quick Reply</option>
+                                <option value="URL">URL / Web Link</option>
+                                <option value="PHONE_NUMBER">Phone Number</option>
+                              </select>
+                            </div>
+
+                            <div>
+                              <div className="flex items-center justify-between mb-0.5">
+                                <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider">
+                                  Button Text <span className="text-red-500">*</span>
+                                </label>
+                                <span className={`text-[9px] font-mono ${btn.text.length > 25 ? "text-red-500 font-bold" : "text-crm-textMuted"}`}>
+                                  {btn.text.length}/25
+                                </span>
+                              </div>
+                              <input
+                                type="text"
+                                required
+                                maxLength={25}
+                                placeholder={
+                                  btn.type === "QUICK_REPLY"
+                                    ? "e.g. Yes / Confirm"
+                                    : btn.type === "URL"
+                                    ? "e.g. Track Package"
+                                    : "e.g. Call Support"
+                                }
+                                value={btn.text}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setButtons((prev) =>
+                                    prev.map((b, i) => (i === index ? { ...b, text: val } : b))
+                                  );
+                                }}
+                                className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                              />
+                            </div>
+                          </div>
+
+                          {btn.type === "URL" && (
+                            <div>
+                              <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider mb-0.5">
+                                Target Web URL <span className="text-red-500">*</span>
+                              </label>
+                              <input
+                                type="url"
+                                required
+                                placeholder="https://example.com/tracking"
+                                value={btn.url}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setButtons((prev) =>
+                                    prev.map((b, i) => (i === index ? { ...b, url: val } : b))
+                                  );
+                                }}
+                                className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                              />
+                            </div>
+                          )}
+
+                          {btn.type === "PHONE_NUMBER" && (
+                            <div>
+                              <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider mb-0.5">
+                                Phone Number (with country code) <span className="text-red-500">*</span>
+                              </label>
+                              <input
+                                type="tel"
+                                required
+                                placeholder="+1234567890"
+                                value={btn.phoneNumber}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setButtons((prev) =>
+                                    prev.map((b, i) => (i === index ? { ...b, phoneNumber: val } : b))
+                                  );
+                                }}
+                                className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-3 border-t border-crm-border flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateModalOpen(false)}
+                    className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
                   >
-                    <option value="utility">Utility</option>
-                    <option value="marketing">Marketing</option>
-                    <option value="authentication">Authentication</option>
-                  </select>
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={createLoading || connectedChannels.length === 0}
+                    className="px-4 py-1.5 rounded-md bg-crm-accent hover:bg-crm-accentHover text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
+                  >
+                    {createLoading ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Creating...</span>
+                      </>
+                    ) : (
+                      <span>Create Draft</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+
+              {/* Right: Live WhatsApp Message Preview (5 cols on lg) */}
+              <div className="lg:col-span-5">
+                <div className="flex flex-col h-full bg-[#EFEAE2]/60 rounded-xl p-4 border border-crm-border sticky top-0">
+                  <div className="flex items-center justify-between pb-2 mb-3 border-b border-crm-border/60">
+                    <div className="flex items-center gap-1.5">
+                      <Smartphone className="w-3.5 h-3.5 text-crm-textSecondary" />
+                      <span className="text-xs font-mono font-medium text-crm-text">
+                        Customer Message Preview
+                      </span>
+                    </div>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono text-crm-textSecondary bg-white border border-crm-border/70">
+                      Live Preview
+                    </span>
+                  </div>
+
+                  <div className="flex-1 flex flex-col justify-start max-w-sm w-full mx-auto py-2">
+                    {/* WhatsApp Message Bubble */}
+                    <div className="bg-white rounded-lg shadow-sm border border-gray-200/70 overflow-hidden text-crm-text relative">
+                      {/* Header Image Preview (At the top of the bubble, above header text) */}
+                      {headerType === "IMAGE" && headerImagePreviewUrl && (
+                        <div className="w-full h-36 bg-gray-100 border-b border-gray-100 relative">
+                          <img
+                            src={headerImagePreviewUrl}
+                            alt="Header Preview"
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                      )}
+
+                      <div className="p-3.5 space-y-2">
+                        {/* Header Text (Bold at top if present) */}
+                        {headerType === "TEXT" && headerText.trim() && (
+                          <div className="font-bold text-xs text-crm-text leading-tight pb-1 border-b border-gray-100">
+                            {headerText.trim()}
+                          </div>
+                        )}
+
+                      {/* Body text with {{placeholder}} replaced by example values */}
+                      <div className="text-xs whitespace-pre-wrap leading-relaxed">
+                        {previewBody.trim() ? (
+                          previewBody
+                        ) : (
+                          <span className="text-crm-textMuted italic">
+                            Enter template body to see live preview...
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Footer text in small gray at bottom if present */}
+                      {footerText.trim() && (
+                        <div className="text-[10px] text-gray-500 pt-1 border-t border-gray-100 leading-tight">
+                          {footerText.trim()}
+                        </div>
+                      )}
+
+                      {/* Timestamp & read receipt */}
+                      <div className="flex items-center justify-end gap-1 text-[9px] text-gray-400 select-none pt-0.5">
+                        <span>10:42 AM</span>
+                        <CheckCheck className="w-3 h-3 text-[#53bdeb]" />
+                      </div>
+                    </div>
+                  </div>
+
+                    {/* Buttons rendered as separate tappable-looking rows below the bubble */}
+                    {buttons.length > 0 && (
+                      <div className="mt-1.5 space-y-1.5">
+                        {buttons.map((btn, idx) => (
+                          <div
+                            key={idx}
+                            className="w-full py-2 px-3 bg-white rounded-lg border border-gray-200/80 shadow-xs flex items-center justify-center gap-1.5 text-xs text-[#00A884] font-medium select-none cursor-pointer hover:bg-gray-50 transition-colors"
+                          >
+                            {btn.type === "QUICK_REPLY" && (
+                              <CornerDownLeft className="w-3 h-3 text-[#00A884]" />
+                            )}
+                            {btn.type === "URL" && (
+                              <ExternalLink className="w-3 h-3 text-[#00A884]" />
+                            )}
+                            {btn.type === "PHONE_NUMBER" && (
+                              <Phone className="w-3 h-3 text-[#00A884]" />
+                            )}
+                            <span className="truncate">
+                              {btn.text.trim() || `Button ${idx + 1}`}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-
-              {/* Template Body */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  Template Body <span className="text-red-500">*</span>
-                </label>
-                <textarea
-                  required
-                  rows={4}
-                  placeholder="Hello {{1}}, your order {{2}} has been confirmed and is now being processed."
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-sans focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors leading-relaxed"
-                />
-                <p className="mt-1 text-[11px] text-crm-textMuted">
-                  Use placeholders like <code className="font-mono text-crm-text">&#123;&#123;1&#125;&#125;</code>, <code className="font-mono text-crm-text">&#123;&#123;2&#125;&#125;</code> for dynamic parameters.
-                </p>
-              </div>
-
-              <div className="pt-3 border-t border-crm-border flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
-                  className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={createLoading || connectedChannels.length === 0}
-                  className="px-4 py-1.5 rounded-md bg-crm-accent hover:bg-crm-accentHover text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
-                >
-                  {createLoading ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Creating...</span>
-                    </>
-                  ) : (
-                    <span>Create Draft</span>
-                  )}
-                </button>
-              </div>
-            </form>
+            </div>
           </div>
         </div>
       )}

@@ -9,3 +9,5 @@ export * from "./tokenEncryption";
 export * from "./services/shopifyClient";
 export * from "./services/journeyStepProcessor";
 export * from "./services/journeyTrigger";
+export * from "./services/messageRecorder";
+export * from "./services/templateVariableResolver";

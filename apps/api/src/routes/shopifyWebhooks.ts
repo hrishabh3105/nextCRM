@@ -4,6 +4,7 @@ import { prisma } from "@nextcrm/db";
 import { decryptToken, verifyShopifyWebhook } from "@nextcrm/core";
 import {
   handleShopifyOrder,
+  handleShopifyOrderUpdate,
   handleShopifyCheckout,
 } from "../services/shopifyWebhookHandler";
 
@@ -12,7 +13,7 @@ export const shopifyWebhooksRouter = Router();
 /**
  * POST /shopify (and POST / for flexible mounting)
  *
- * Receives webhook events from Shopify (orders/create, checkouts/create, checkouts/update).
+ * Receives webhook events from Shopify (orders/create, orders/updated, checkouts/create, checkouts/update).
  * Uses express.raw({ type: "application/json" }) to capture the untouched raw body Buffer
  * required for HMAC-SHA256 signature verification.
  */
@@ -89,6 +90,10 @@ shopifyWebhooksRouter.post(
       switch (topic) {
         case "orders/create":
           await handleShopifyOrder(payload, storeConnection.workspaceId);
+          break;
+
+        case "orders/updated":
+          await handleShopifyOrderUpdate(payload, storeConnection.workspaceId);
           break;
 
         case "checkouts/create":

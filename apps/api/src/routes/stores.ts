@@ -63,7 +63,12 @@ storesRouter.post(
 
       // Register webhooks for order and checkout events
       const webhookUrl = `${env.PUBLIC_WEBHOOK_BASE_URL}/webhooks/shopify`;
-      const topics = ["orders/create", "checkouts/create", "checkouts/update"];
+      const topics = [
+        "orders/create",
+        "orders/updated",
+        "checkouts/create",
+        "checkouts/update",
+      ];
 
       for (const topic of topics) {
         const result = await registerWebhook({

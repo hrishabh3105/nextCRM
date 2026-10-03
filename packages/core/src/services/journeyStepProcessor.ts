@@ -2,6 +2,8 @@ import { forWorkspace } from "../tenantScope";
 import { decryptToken } from "../tokenEncryption";
 import { sendTemplateMessage } from "./metaClient";
 import { recordMessageCost } from "./costTracker";
+import { checkFrequencyCap, recordOutboundMessage } from "./messageRecorder";
+import { resolveTemplateVariables, VariableMapping } from "./templateVariableResolver";
 import { journeyTickQueue } from "../queue";
 
 export interface JourneyStep {
@@ -10,6 +12,7 @@ export interface JourneyStep {
   templateId?: string;
   channelId?: string;
   variables?: string[];
+  variableMapping?: VariableMapping;
   check?: string;
   conditionType?: string;
   onTrue?: "exit" | string;
@@ -18,6 +21,35 @@ export interface JourneyStep {
   onFalseIndex?: number;
   reason?: string;
   [key: string]: any;
+}
+
+const CONFIRM_KEYWORDS = ["yes", "confirm", "confirmed", "haan", "ok", "okay"];
+const DECLINE_KEYWORDS = ["no", "cancel", "nahi", "decline", "stop"];
+
+function matchesKeywords(text: string, keywords: string[]): boolean {
+  const normalized = text.toLowerCase().trim();
+  return keywords.some((kw) => normalized.includes(kw));
+}
+
+/**
+ * TIER 1 — simple keyword matching for reply intent classification.
+ * Upgrade path: replace the body of this function with a call to an
+ * LLM classification service (prompt: "classify this WhatsApp reply
+ * as confirmed/declined/unclear"), keeping the same function
+ * signature — callers (the condition step logic below) don't need
+ * to change. This is a deliberate interim implementation, not an
+ * oversight — see project notes for the Tier 2 plan.
+ */
+async function getLatestInboundReplySince(
+  db: any,
+  contactId: string,
+  since: Date
+): Promise<string | null> {
+  const message = await db.message.findFirst({
+    where: { contactId, direction: "inbound", createdAt: { gte: since } },
+    orderBy: { createdAt: "desc" },
+  });
+  return message?.body ?? null;
 }
 
 /**
@@ -196,6 +228,62 @@ export async function processJourneyStep(
         return;
       }
 
+      const canSend = await checkFrequencyCap(db, contact.id);
+      if (!canSend) {
+        console.log(
+          `[journey-step-processor] Contact ${contact.id} reached frequency cap in run ${runId}. Skipping send_message step.`
+        );
+        await db.journeyRun.update({
+          where: { id: runId },
+          data: {
+            currentStepIndex: run.currentStepIndex + 1,
+            status: "running",
+            nextStepAt: null,
+          },
+        });
+        return processJourneyStep(runId, workspaceId, depth + 1);
+      }
+
+      const templatePlaceholders = Array.isArray(template.positionalPlaceholders)
+        ? (template.positionalPlaceholders as string[])
+        : Array.isArray(template.placeholders)
+          ? (template.placeholders as string[])
+          : [];
+
+      let variables: string[] = [];
+
+      if (templatePlaceholders.length > 0) {
+        const mapping =
+          step.variableMapping &&
+          typeof step.variableMapping === "object" &&
+          !Array.isArray(step.variableMapping)
+            ? (step.variableMapping as any)
+            : {};
+
+        const resolvedResult = resolveTemplateVariables({
+          placeholders: templatePlaceholders,
+          mapping,
+          contact,
+        });
+
+        if ("error" in resolvedResult) {
+          console.warn(
+            `[journey-step-processor] Variable resolution failed for contact ${contact.id} in run ${runId}: ${resolvedResult.error}. Advancing to next step.`
+          );
+          await db.journeyRun.update({
+            where: { id: runId },
+            data: {
+              currentStepIndex: run.currentStepIndex + 1,
+              status: "running",
+              nextStepAt: null,
+            },
+          });
+          return processJourneyStep(runId, workspaceId, depth + 1);
+        }
+
+        variables = resolvedResult.resolved;
+      }
+
       try {
         const accessToken = decryptToken(channel.accessTokenEnc);
         const result = await sendTemplateMessage({
@@ -204,13 +292,21 @@ export async function processJourneyStep(
           to: contact.phone,
           templateName: template.providerName,
           language: template.language,
-          variables: Array.isArray(step.variables) ? step.variables : [],
+          variables,
         });
 
         await recordMessageCost({
           workspaceId,
           messageId: result.providerMessageId,
           category: template.category,
+        });
+
+        await recordOutboundMessage({
+          workspaceId,
+          contactId: contact.id,
+          channelId: channel.id,
+          providerMessageId: result.providerMessageId,
+          body: template.bodyPreview,
         });
       } catch (metaErr) {
         console.error(`[journey-step-processor] Meta send error in run ${runId}:`, metaErr);
@@ -249,6 +345,20 @@ export async function processJourneyStep(
           },
         });
         matched = !!order;
+      } else if (check === "customer_confirmed_via_reply") {
+        const reply = await getLatestInboundReplySince(
+          db,
+          run.contactId,
+          run.createdAt
+        );
+        matched = !!reply && matchesKeywords(reply, CONFIRM_KEYWORDS);
+      } else if (check === "customer_declined_via_reply") {
+        const reply = await getLatestInboundReplySince(
+          db,
+          run.contactId,
+          run.createdAt
+        );
+        matched = !!reply && matchesKeywords(reply, DECLINE_KEYWORDS);
       }
 
       if (matched) {

@@ -49,14 +49,25 @@ journeysRouter.post(
     const db = forWorkspace(req.workspaceId!);
 
     // 1. Create Journey row with status 'active'
-    const journey = await db.journey.create({
-      data: {
-        workspaceId: req.workspaceId!,
-        name,
-        triggerEvent,
-        status: "active",
-      },
-    });
+    let journey;
+    try {
+      journey = await db.journey.create({
+        data: {
+          workspaceId: req.workspaceId!,
+          name,
+          triggerEvent,
+          status: "active",
+        },
+      });
+    } catch (err: any) {
+      if (err?.code === "P2002") {
+        throw new ApiError(
+          409,
+          `An active journey already exists for trigger '${triggerEvent}'. Pause or deactivate it before activating a new one for the same trigger.`
+        );
+      }
+      throw err;
+    }
 
     // 2. Create first JourneyVersion (versionNumber: 1)
     const version = await db.journeyVersion.create({

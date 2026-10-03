@@ -43,6 +43,32 @@ contactsRouter.get(
 );
 
 /**
+ * GET /attribute-keys
+ * Returns the union of all distinct attribute keys present across contacts in this workspace.
+ */
+contactsRouter.get(
+  "/attribute-keys",
+  asyncHandler(async (req: Request, res: Response) => {
+    const contacts = await forWorkspace(req.workspaceId!).contact.findMany({
+      select: { attributes: true },
+    });
+
+    const keySet = new Set<string>();
+    for (const contact of contacts) {
+      const attrs = contact.attributes;
+      if (attrs && typeof attrs === "object" && !Array.isArray(attrs)) {
+        for (const key of Object.keys(attrs as Record<string, unknown>)) {
+          keySet.add(key);
+        }
+      }
+    }
+
+    const keys = Array.from(keySet).sort((a, b) => a.localeCompare(b));
+    res.status(200).json({ keys });
+  })
+);
+
+/**
  * GET /:id
  * Retrieves a single contact by id within the authenticated workspace.
  */

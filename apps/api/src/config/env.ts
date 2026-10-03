@@ -19,5 +19,8 @@ export const env = {
   TOKEN_ENCRYPTION_KEY: required("TOKEN_ENCRYPTION_KEY"),
   META_WEBHOOK_VERIFY_TOKEN: required("META_WEBHOOK_VERIFY_TOKEN"),
   META_APP_SECRET: required("META_APP_SECRET"),
+  // Found in Meta App Dashboard > Settings > Basic > App ID.
+  // Note: This is a different value from META_APP_SECRET.
+  META_APP_ID: required("META_APP_ID"),
   PUBLIC_WEBHOOK_BASE_URL: process.env.PUBLIC_WEBHOOK_BASE_URL || "",
 };

@@ -127,8 +127,16 @@ model Template {
   language           String   @default("en_US")
   category           String
   previousCategory   String?  @map("previous_category")
+  headerType         String?  @default("TEXT") @map("header_type")
+  headerText         String?  @map("header_text")
+  headerMediaHandle  String?  @map("header_media_handle")
   bodyPreview        String   @map("body_preview")
+  footerText         String?  @map("footer_text")
+  buttons            Json?
   variableCount      Int      @default(0) @map("variable_count")
+  placeholders           Json?
+  positionalPlaceholders Json?    @map("positional_placeholders")
+  examples               Json?
   status             String   @default("draft")
   rejectionReason    String?  @map("rejection_reason")
   createdAt          DateTime @default(now()) @map("created_at")
@@ -152,6 +160,10 @@ model Campaign {
   totalRecipients Int       @default(0) @map("total_recipients")
   sentCount       Int       @default(0) @map("sent_count")
   failedCount     Int       @default(0) @map("failed_count")
+  skippedCount    Int       @default(0) @map("skipped_count")
+  variableMapping Json?     @map("variable_mapping")
+  segment         Json?     // null = "all" (today's default behavior, unchanged)
+  archived        Boolean   @default(false)
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
@@ -276,6 +288,7 @@ model Order {
   contactId      String?  @map("contact_id")
   shopifyOrderId String   @map("shopify_order_id")
   status         String
+  fulfillmentStatus String?  @map("fulfillment_status")
   totalPrice     Decimal  @db.Decimal(10, 2) @map("total_price")
   currency       String
   createdAt      DateTime @default(now()) @map("created_at")
@@ -321,6 +334,11 @@ model Journey {
   runs      JourneyRun[]
 
   @@index([workspaceId])
+  // NOTE: a partial unique index (journeys_active_trigger_unique) exists
+  // directly in the database via a raw migration — this index is NOT
+  // representable in Prisma's schema language and is intentionally
+  // absent from this model definition. Do not add an @@index or
+  // @@unique attempting to represent it.
   @@map("journeys")
 }
 

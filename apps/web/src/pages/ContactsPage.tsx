@@ -11,6 +11,8 @@ import {
   Check,
   FileText,
   Loader2,
+  Tag,
+  Trash2,
 } from "lucide-react";
 
 export interface Contact {
@@ -22,6 +24,13 @@ export interface Contact {
   optedInAt: string | null;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface AttributeRow {
+  id: string;
+  key: string;
+  value: string;
+  type: "string" | "number" | "boolean";
 }
 
 export interface ImportResult {
@@ -55,6 +64,15 @@ export const ContactsPage: React.FC = () => {
   // Modals state
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
+
+  // Attribute Keys Suggestions
+  const [availableKeys, setAvailableKeys] = useState<string[]>([]);
+
+  // Edit Attributes Modal State
+  const [editingContact, setEditingContact] = useState<Contact | null>(null);
+  const [attributeRows, setAttributeRows] = useState<AttributeRow[]>([]);
+  const [attrLoading, setAttrLoading] = useState<boolean>(false);
+  const [attrError, setAttrError] = useState<string | null>(null);
 
   // Add Contact Form State
   const [addPhone, setAddPhone] = useState<string>("");
@@ -101,10 +119,166 @@ export const ContactsPage: React.FC = () => {
     }
   }, []);
 
+  // Fetch attribute keys across workspace
+  const fetchAttributeKeys = useCallback(async () => {
+    try {
+      const data = await api.get<{ keys: string[] }>("/api/v1/contacts/attribute-keys");
+      if (data && Array.isArray(data.keys)) {
+        setAvailableKeys(data.keys);
+      }
+    } catch {
+      // Non-blocking fallback
+    }
+  }, []);
+
   // Fetch contacts when debouncedSearch changes
   useEffect(() => {
     fetchContacts(debouncedSearch);
   }, [debouncedSearch, fetchContacts]);
+
+  // Fetch attribute keys initially
+  useEffect(() => {
+    fetchAttributeKeys();
+  }, [fetchAttributeKeys]);
+
+  // Handle opening attribute editor modal
+  const openEditAttributesModal = (contact: Contact) => {
+    setEditingContact(contact);
+    setAttrError(null);
+
+    const rows: AttributeRow[] = [];
+    if (
+      contact.attributes &&
+      typeof contact.attributes === "object" &&
+      !Array.isArray(contact.attributes)
+    ) {
+      for (const [key, val] of Object.entries(contact.attributes)) {
+        let type: "string" | "number" | "boolean" = "string";
+        let valStr = "";
+        if (typeof val === "boolean") {
+          type = "boolean";
+          valStr = val ? "true" : "false";
+        } else if (typeof val === "number") {
+          type = "number";
+          valStr = String(val);
+        } else {
+          type = "string";
+          valStr = val !== null && val !== undefined ? String(val) : "";
+        }
+        rows.push({
+          id: Math.random().toString(36).substring(2, 9),
+          key,
+          value: valStr,
+          type,
+        });
+      }
+    }
+
+    if (rows.length === 0) {
+      rows.push({
+        id: Math.random().toString(36).substring(2, 9),
+        key: "",
+        value: "",
+        type: "string",
+      });
+    }
+
+    setAttributeRows(rows);
+  };
+
+  const addAttributeRow = () => {
+    if (attributeRows.length >= 20) return;
+    setAttributeRows((prev) => [
+      ...prev,
+      {
+        id: Math.random().toString(36).substring(2, 9),
+        key: "",
+        value: "",
+        type: "string",
+      },
+    ]);
+  };
+
+  const removeAttributeRow = (id: string) => {
+    setAttributeRows((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  const updateAttributeRow = (id: string, patch: Partial<AttributeRow>) => {
+    setAttributeRows((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, ...patch } : r))
+    );
+  };
+
+  const handleSaveAttributes = async () => {
+    if (!editingContact) return;
+
+    // Filter out rows where both key and value are blank
+    const activeRows = attributeRows.filter(
+      (r) => r.key.trim() !== "" || r.value.trim() !== ""
+    );
+
+    if (activeRows.length > 20) {
+      setAttrError("Attributes cannot have more than 20 keys.");
+      return;
+    }
+
+    const payload: Record<string, string | number | boolean> = {};
+    const seenKeys = new Set<string>();
+
+    for (let i = 0; i < activeRows.length; i++) {
+      const row = activeRows[i];
+      const trimmedKey = row.key.trim();
+
+      if (!trimmedKey) {
+        setAttrError(`Row ${i + 1} has a value but no key name.`);
+        return;
+      }
+
+      if (seenKeys.has(trimmedKey)) {
+        setAttrError(`Duplicate key "${trimmedKey}". Each attribute key must be unique.`);
+        return;
+      }
+      seenKeys.add(trimmedKey);
+
+      if (row.type === "number") {
+        if (row.value.trim() === "" || isNaN(Number(row.value))) {
+          setAttrError(`Value for "${trimmedKey}" must be a valid number.`);
+          return;
+        }
+        payload[trimmedKey] = Number(row.value);
+      } else if (row.type === "boolean") {
+        payload[trimmedKey] = row.value === "true";
+      } else {
+        payload[trimmedKey] = row.value;
+      }
+    }
+
+    setAttrLoading(true);
+    setAttrError(null);
+
+    try {
+      const updated = await api.patch<Contact>(`/api/v1/contacts/${editingContact.id}`, {
+        attributes: payload,
+      });
+
+      setContacts((prev) =>
+        prev.map((c) => (c.id === updated.id ? { ...c, attributes: updated.attributes } : c))
+      );
+
+      await fetchAttributeKeys();
+      setEditingContact(null);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setAttrError(err.message);
+      } else if (err instanceof Error) {
+        setAttrError(err.message);
+      } else {
+        setAttrError("Failed to update contact attributes.");
+      }
+    } finally {
+      setAttrLoading(false);
+    }
+  };
 
   // Handle Add Contact Submit
   const handleAddSubmit = async (e: React.FormEvent) => {
@@ -169,6 +343,7 @@ export const ContactsPage: React.FC = () => {
       setImportResult(result);
       // Re-fetch contacts to reflect new additions
       await fetchContacts(debouncedSearch);
+      await fetchAttributeKeys();
     } catch (err) {
       if (err instanceof ApiError) {
         setImportError(err.message);
@@ -318,13 +493,21 @@ export const ContactsPage: React.FC = () => {
                   <th className="py-2.5 px-4 font-medium">Name</th>
                   <th className="py-2.5 px-4 font-medium">Phone</th>
                   <th className="py-2.5 px-4 font-medium">Email</th>
+                  <th className="py-2.5 px-4 font-medium">Attributes</th>
                   <th className="py-2.5 px-4 font-medium">Opted In</th>
                   <th className="py-2.5 px-4 font-medium">Added</th>
+                  <th className="py-2.5 px-4 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-crm-border text-xs">
                 {contacts.map((contact) => {
                   const isOptedIn = Boolean(contact.optedInAt);
+                  const attrs =
+                    contact.attributes &&
+                    typeof contact.attributes === "object" &&
+                    !Array.isArray(contact.attributes)
+                      ? Object.entries(contact.attributes)
+                      : [];
 
                   return (
                     <tr
@@ -356,6 +539,48 @@ export const ContactsPage: React.FC = () => {
                         )}
                       </td>
 
+                      {/* Attributes Column */}
+                      <td className="py-3 px-4">
+                        {attrs.length > 0 ? (
+                          <div className="flex flex-wrap items-center gap-1.5 max-w-xs">
+                            {attrs.slice(0, 3).map(([k, v]) => (
+                              <span
+                                key={k}
+                                title={`${k}: ${String(v)}`}
+                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-crm-elevated text-crm-textSecondary border border-crm-border shadow-xs"
+                              >
+                                <span className="font-semibold text-crm-text truncate max-w-[70px]">
+                                  {k}
+                                </span>
+                                <span className="text-crm-textMuted">:</span>
+                                <span className="truncate max-w-[80px]">
+                                  {typeof v === "boolean"
+                                    ? v
+                                      ? "true"
+                                      : "false"
+                                    : String(v ?? "")}
+                                </span>
+                              </span>
+                            ))}
+                            {attrs.length > 3 && (
+                              <button
+                                type="button"
+                                onClick={() => openEditAttributesModal(contact)}
+                                title={attrs
+                                  .slice(3)
+                                  .map(([k, v]) => `${k}: ${String(v)}`)
+                                  .join(", ")}
+                                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-crm-subtle text-crm-textMuted hover:text-crm-text border border-crm-border transition-colors"
+                              >
+                                +{attrs.length - 3} more
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-crm-textMuted font-mono text-[11px]">—</span>
+                        )}
+                      </td>
+
                       {/* Opted In Badge */}
                       <td className="py-3 px-4">
                         {isOptedIn ? (
@@ -374,6 +599,19 @@ export const ContactsPage: React.FC = () => {
                       {/* Added Date */}
                       <td className="py-3 px-4 font-mono text-crm-textSecondary whitespace-nowrap">
                         {formatDate(contact.createdAt)}
+                      </td>
+
+                      {/* Actions Column */}
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => openEditAttributesModal(contact)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-crm-textSecondary hover:text-crm-text bg-crm-surface hover:bg-crm-elevated border border-crm-border transition-colors shadow-xs"
+                          title="Edit contact attributes"
+                        >
+                          <Tag className="w-3 h-3 text-crm-accent" />
+                          <span>Attributes</span>
+                        </button>
                       </td>
                     </tr>
                   );
@@ -609,6 +847,219 @@ export const ContactsPage: React.FC = () => {
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* HTML Datalist for Attribute Key Suggestions */}
+      <datalist id="attribute-key-suggestions">
+        {availableKeys.map((key) => (
+          <option key={key} value={key} />
+        ))}
+      </datalist>
+
+      {/* Edit Attributes Modal */}
+      {editingContact && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
+          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-xl p-6 relative">
+            <div className="flex items-center justify-between pb-4 border-b border-crm-border">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-md bg-crm-accentSubtle border border-crm-accentBorder flex items-center justify-center text-crm-accent">
+                  <Tag className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-heading font-semibold text-crm-text">
+                      Edit Attributes
+                    </h2>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono text-crm-textSecondary bg-crm-elevated border border-crm-border">
+                      {attributeRows.filter((r) => r.key.trim() || r.value.trim()).length} / 20
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-crm-textSecondary mt-0.5">
+                    {editingContact.name
+                      ? `${editingContact.name} (${editingContact.phone})`
+                      : editingContact.phone}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingContact(null)}
+                className="text-crm-textMuted hover:text-crm-text p-1 rounded transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {attrError && (
+              <div className="mt-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                <span>{attrError}</span>
+              </div>
+            )}
+
+            <div className="mt-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider">
+                  Attribute Key & Value Pairs
+                </span>
+                <span className="text-[11px] text-crm-textMuted">
+                  Flat string, number, or boolean values only
+                </span>
+              </div>
+
+              {/* Rows container */}
+              <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+                {attributeRows.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-crm-textMuted border border-dashed border-crm-border rounded-lg bg-crm-elevated/30">
+                    No attributes defined. Click &ldquo;Add attribute&rdquo; below to create one.
+                  </div>
+                ) : (
+                  attributeRows.map((row) => (
+                    <div key={row.id} className="flex items-center gap-2">
+                      {/* Key input with datalist */}
+                      <div className="flex-1 min-w-[130px]">
+                        <input
+                          type="text"
+                          list="attribute-key-suggestions"
+                          placeholder="Key (e.g. tier, score)"
+                          value={row.key}
+                          onChange={(e) =>
+                            updateAttributeRow(row.id, { key: e.target.value })
+                          }
+                          className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                        />
+                      </div>
+
+                      {/* Type selector */}
+                      <div className="w-24 flex-shrink-0">
+                        <select
+                          value={row.type}
+                          onChange={(e) => {
+                            const nextType = e.target.value as
+                              | "string"
+                              | "number"
+                              | "boolean";
+                            let nextVal = row.value;
+                            if (nextType === "boolean") {
+                              nextVal =
+                                row.value === "true" || row.value === "false"
+                                  ? row.value
+                                  : "true";
+                            }
+                            updateAttributeRow(row.id, {
+                              type: nextType,
+                              value: nextVal,
+                            });
+                          }}
+                          className="w-full px-2 py-1.5 bg-crm-elevated/70 border border-crm-border rounded-md text-xs font-sans text-crm-text focus:outline-none focus:border-crm-accent transition-colors"
+                        >
+                          <option value="string">Text</option>
+                          <option value="number">Number</option>
+                          <option value="boolean">Boolean</option>
+                        </select>
+                      </div>
+
+                      {/* Value input */}
+                      <div className="flex-1 min-w-[130px]">
+                        {row.type === "boolean" ? (
+                          <select
+                            value={row.value === "false" ? "false" : "true"}
+                            onChange={(e) =>
+                              updateAttributeRow(row.id, { value: e.target.value })
+                            }
+                            className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text focus:outline-none focus:border-crm-accent transition-colors"
+                          >
+                            <option value="true">true</option>
+                            <option value="false">false</option>
+                          </select>
+                        ) : row.type === "number" ? (
+                          <input
+                            type="number"
+                            step="any"
+                            placeholder="e.g. 100"
+                            value={row.value}
+                            onChange={(e) =>
+                              updateAttributeRow(row.id, { value: e.target.value })
+                            }
+                            className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                          />
+                        ) : (
+                          <input
+                            type="text"
+                            placeholder="Value (e.g. gold)"
+                            value={row.value}
+                            onChange={(e) =>
+                              updateAttributeRow(row.id, { value: e.target.value })
+                            }
+                            className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
+                          />
+                        )}
+                      </div>
+
+                      {/* Remove row button */}
+                      <button
+                        type="button"
+                        onClick={() => removeAttributeRow(row.id)}
+                        className="p-1.5 text-crm-textMuted hover:text-red-600 hover:bg-red-50 rounded transition-colors flex-shrink-0"
+                        title="Remove attribute"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* Add row & helpers */}
+              <div className="pt-2 flex items-center justify-between">
+                <button
+                  type="button"
+                  disabled={attributeRows.length >= 20}
+                  onClick={addAttributeRow}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-dashed border-crm-borderStrong text-xs font-medium text-crm-text hover:bg-crm-elevated transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Plus className="w-3.5 h-3.5 text-crm-accent" />
+                  <span>Add attribute</span>
+                </button>
+
+                {attributeRows.length >= 20 && (
+                  <span className="text-[11px] text-amber-600 font-medium">
+                    Maximum 20 attributes reached
+                  </span>
+                )}
+              </div>
+
+              <p className="text-[11px] text-crm-textMuted pt-1">
+                Suggestions in the key field are populated from distinct attribute keys used across your workspace.
+              </p>
+
+              {/* Footer actions */}
+              <div className="pt-3 border-t border-crm-border flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingContact(null)}
+                  className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={attrLoading}
+                  onClick={handleSaveAttributes}
+                  className="px-4 py-1.5 rounded-md bg-crm-accent hover:bg-crm-accentHover text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
+                >
+                  {attrLoading ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Saving...</span>
+                    </>
+                  ) : (
+                    <span>Save Attributes</span>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
