@@ -381,3 +381,47 @@ templatesRouter.post(
     res.status(200).json({ providerMessageId: result.providerMessageId });
   })
 );
+
+/**
+ * DELETE /:id
+ * Deletes a draft template. Submitted or approved templates cannot be deleted,
+ * nor can templates referenced by any campaign.
+ */
+templatesRouter.delete(
+  "/:id",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+
+    const template = await db.template.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!template) {
+      throw new ApiError(404, "Template not found");
+    }
+
+    if (template.status !== "draft") {
+      throw new ApiError(
+        400,
+        "Only draft templates can be deleted — submitted or approved templates may be in use by campaigns"
+      );
+    }
+
+    const campaignCount = await db.campaign.count({
+      where: { templateId: req.params.id },
+    });
+
+    if (campaignCount > 0) {
+      throw new ApiError(
+        400,
+        "This template is referenced by one or more campaigns and cannot be deleted"
+      );
+    }
+
+    await db.template.delete({
+      where: { id: req.params.id },
+    });
+
+    res.status(204).send();
+  })
+);

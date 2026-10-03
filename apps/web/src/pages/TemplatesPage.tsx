@@ -101,6 +101,11 @@ export const TemplatesPage: React.FC = () => {
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
 
+  // Delete Draft Template state
+  const [templateToDelete, setTemplateToDelete] = useState<Template | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState<boolean>(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   // Create Template Modal state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [channelId, setChannelId] = useState<string>("");
@@ -467,6 +472,29 @@ export const TemplatesPage: React.FC = () => {
       setActionErrors((prev) => ({ ...prev, [template.id]: errorMsg }));
     } finally {
       setActionLoading((prev) => ({ ...prev, [template.id]: false }));
+    }
+  };
+
+  // Confirm delete of a draft template
+  const handleConfirmDelete = async () => {
+    if (!templateToDelete) return;
+    setDeleteLoading(true);
+    setDeleteError(null);
+    try {
+      await api.delete(`/api/v1/templates/${templateToDelete.id}`);
+      setTemplates((prev) => prev.filter((t) => t.id !== templateToDelete.id));
+      setSuccessMessage(`Draft template "${templateToDelete.providerName}" deleted.`);
+      setTemplateToDelete(null);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setDeleteError(err.message);
+      } else if (err instanceof Error) {
+        setDeleteError(err.message);
+      } else {
+        setDeleteError("Failed to delete template.");
+      }
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -838,6 +866,28 @@ export const TemplatesPage: React.FC = () => {
                         className="text-red-500 hover:text-red-700 p-0.5"
                       >
                         <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Draft-only Actions Row (Deliberately separated from primary 'Submit to Meta' button) */}
+                  {statusLower === "draft" && (
+                    <div className="flex items-center justify-between pt-2 border-t border-crm-border/60">
+                      <span className="text-[11px] text-crm-textMuted font-mono">
+                        Unsubmitted draft
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTemplateToDelete(template);
+                          setDeleteError(null);
+                        }}
+                        disabled={isActionLoading}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 rounded-md transition-colors"
+                        title="Delete this draft template"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete draft</span>
                       </button>
                     </div>
                   )}
@@ -1440,6 +1490,78 @@ export const TemplatesPage: React.FC = () => {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Draft Template Confirmation Modal */}
+      {templateToDelete && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
+          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-md p-6 relative">
+            <div className="flex items-center justify-between pb-4 border-b border-crm-border">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-md bg-red-50 border border-red-200 flex items-center justify-center text-red-600">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <h2 className="text-sm font-heading font-semibold text-crm-text">
+                  Delete Draft Template
+                </h2>
+              </div>
+              <button
+                onClick={() => {
+                  setTemplateToDelete(null);
+                  setDeleteError(null);
+                }}
+                className="text-crm-textMuted hover:text-crm-text p-1 rounded transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {deleteError && (
+              <div className="mt-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                <span>{deleteError}</span>
+              </div>
+            )}
+
+            <div className="mt-4 space-y-2 text-xs text-crm-textSecondary">
+              <p>
+                Are you sure you want to permanently delete the draft template{" "}
+                <strong className="text-crm-text font-mono">&quot;{templateToDelete.providerName}&quot;</strong>?
+              </p>
+              <p className="text-[11px] text-crm-textMuted">
+                This action cannot be undone. Only unsubmitted draft templates not referenced by any campaign can be deleted.
+              </p>
+            </div>
+
+            <div className="mt-6 pt-3 border-t border-crm-border flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setTemplateToDelete(null);
+                  setDeleteError(null);
+                }}
+                className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleteLoading}
+                onClick={handleConfirmDelete}
+                className="px-4 py-1.5 rounded-md bg-red-600 hover:bg-red-700 text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
+              >
+                {deleteLoading ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <span>Delete Template</span>
+                )}
+              </button>
             </div>
           </div>
         </div>

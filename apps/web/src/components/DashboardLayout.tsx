@@ -10,6 +10,8 @@ import {
   LayoutDashboard,
   ShieldCheck,
   MessageSquare,
+  ShoppingBag,
+  GitBranch,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 
@@ -25,8 +27,10 @@ const NAV_ITEMS: NavItem[] = [
   { name: "Conversations", to: "/conversations", icon: MessageSquare },
   { name: "Contacts", to: "/contacts", icon: Users },
   { name: "Channels", to: "/channels", icon: Radio },
+  { name: "Stores", to: "/stores", icon: ShoppingBag },
   { name: "Templates", to: "/templates", icon: FileText },
   { name: "Campaigns", to: "/campaigns", icon: Megaphone },
+  { name: "Journeys", to: "/journeys", icon: GitBranch },
   { name: "Usage", to: "/usage", icon: BarChart3 },
 ];
 

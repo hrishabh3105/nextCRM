@@ -17,3 +17,10 @@ export const createStoreConnectionSchema = z.object({
 });
 
 export type CreateStoreConnectionInput = z.infer<typeof createStoreConnectionSchema>;
+
+export const reconnectStoreConnectionSchema = z.object({
+  accessToken: z.string().min(1).optional(),
+  apiSecretKey: z.string().min(1).optional(),
+});
+
+export type ReconnectStoreConnectionInput = z.infer<typeof reconnectStoreConnectionSchema>;

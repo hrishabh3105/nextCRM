@@ -24,6 +24,30 @@ journeysRouter.get(
   })
 );
 
+export const ACTIVE_JOURNEY_CONFLICT_MSG = (triggerEvent: string) =>
+  `An active journey already exists for trigger '${triggerEvent}'. Pause or deactivate it before activating a new one for the same trigger.`;
+
+/**
+ * GET /
+ * Lists all journeys for the workspace, ordered by creation date descending.
+ * Includes versions so clients can inspect steps and step count.
+ */
+journeysRouter.get(
+  "/",
+  asyncHandler(async (req: Request, res: Response) => {
+    const journeys = await forWorkspace(req.workspaceId!).journey.findMany({
+      orderBy: { createdAt: "desc" },
+      include: {
+        versions: {
+          orderBy: { versionNumber: "desc" },
+        },
+      },
+    });
+
+    res.status(200).json(journeys);
+  })
+);
+
 /**
  * POST /
  * Creates a journey (status "active") and its first JourneyVersion (versionNumber 1),
@@ -61,10 +85,7 @@ journeysRouter.post(
       });
     } catch (err: any) {
       if (err?.code === "P2002") {
-        throw new ApiError(
-          409,
-          `An active journey already exists for trigger '${triggerEvent}'. Pause or deactivate it before activating a new one for the same trigger.`
-        );
+        throw new ApiError(409, ACTIVE_JOURNEY_CONFLICT_MSG(triggerEvent));
       }
       throw err;
     }
@@ -90,6 +111,77 @@ journeysRouter.post(
       journey: updatedJourney,
       version,
     });
+  })
+);
+
+/**
+ * POST /:id/pause
+ * Pauses an active journey.
+ */
+journeysRouter.post(
+  "/:id/pause",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+
+    const journey = await db.journey.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!journey) {
+      throw new ApiError(404, "Journey not found");
+    }
+
+    if (journey.status !== "active") {
+      throw new ApiError(400, "Only active journeys can be paused");
+    }
+
+    const updated = await db.journey.update({
+      where: { id: req.params.id },
+      data: { status: "paused" },
+    });
+
+    res.status(200).json(updated);
+  })
+);
+
+/**
+ * POST /:id/activate
+ * Activates a paused/draft journey, reusing the atomic claim behavior
+ * against the partial unique index.
+ */
+journeysRouter.post(
+  "/:id/activate",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+
+    const journey = await db.journey.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!journey) {
+      throw new ApiError(404, "Journey not found");
+    }
+
+    if (journey.status === "active") {
+      throw new ApiError(400, "Only paused journeys can be activated");
+    }
+
+    try {
+      const updated = await db.journey.update({
+        where: { id: req.params.id },
+        data: { status: "active" },
+      });
+
+      res.status(200).json(updated);
+    } catch (err: any) {
+      if (err?.code === "P2002") {
+        throw new ApiError(
+          409,
+          ACTIVE_JOURNEY_CONFLICT_MSG(journey.triggerEvent)
+        );
+      }
+      throw err;
+    }
   })
 );
 

@@ -8,8 +8,10 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { ContactsPage } from "./pages/ContactsPage";
 import { ConversationsPage } from "./pages/ConversationsPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
+import { StoresPage } from "./pages/StoresPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
 import { CampaignsPage } from "./pages/CampaignsPage";
+import { JourneysPage } from "./pages/JourneysPage";
 import { UsagePage } from "./pages/UsagePage";
 
 export const App: React.FC = () => {
@@ -28,8 +30,10 @@ export const App: React.FC = () => {
               <Route path="/conversations" element={<ConversationsPage />} />
               <Route path="/contacts" element={<ContactsPage />} />
               <Route path="/channels" element={<ChannelsPage />} />
+              <Route path="/stores" element={<StoresPage />} />
               <Route path="/templates" element={<TemplatesPage />} />
               <Route path="/campaigns" element={<CampaignsPage />} />
+              <Route path="/journeys" element={<JourneysPage />} />
               <Route path="/usage" element={<UsagePage />} />
             </Route>
           </Route>
