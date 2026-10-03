@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { api, ApiError } from "../lib/api";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   Radio,
   Plus,
@@ -66,6 +67,8 @@ export const ChannelsPage: React.FC = () => {
 
   // Disconnect State
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [channelToDisconnect, setChannelToDisconnect] = useState<Channel | null>(null);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   // Fetch channels list
   const fetchChannels = useCallback(async () => {
@@ -196,30 +199,28 @@ export const ChannelsPage: React.FC = () => {
     }
   };
 
-  // Handle Disconnect Channel
-  const handleDisconnect = async (channel: Channel) => {
-    const confirmed = window.confirm(
-      "Disconnect this channel? Existing templates and campaigns will be preserved but this channel can no longer send messages."
-    );
+  // Handle Disconnect Channel Confirmation
+  const handleConfirmDisconnect = async () => {
+    if (!channelToDisconnect) return;
 
-    if (!confirmed) return;
-
-    setDisconnectingId(channel.id);
+    setDisconnectingId(channelToDisconnect.id);
+    setDisconnectError(null);
     setError(null);
     setReplaceSuccess(null);
     setPageWarning(null);
 
     try {
-      await api.post<Channel>(`/api/v1/channels/${channel.id}/disconnect`);
-      setReplaceSuccess(`Channel ${channel.phoneNumber || ""} disconnected.`);
+      await api.post<Channel>(`/api/v1/channels/${channelToDisconnect.id}/disconnect`);
+      setReplaceSuccess(`Channel ${channelToDisconnect.phoneNumber || ""} disconnected.`);
+      setChannelToDisconnect(null);
       await fetchChannels();
     } catch (err) {
       if (err instanceof ApiError) {
-        setError(err.message);
+        setDisconnectError(err.message);
       } else if (err instanceof Error) {
-        setError(err.message);
+        setDisconnectError(err.message);
       } else {
-        setError("Failed to disconnect channel.");
+        setDisconnectError("Failed to disconnect channel.");
       }
     } finally {
       setDisconnectingId(null);
@@ -264,7 +265,7 @@ export const ChannelsPage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-5">
+    <div className="max-w-7xl mx-auto space-y-5">
       {/* Top Header & Action */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -427,15 +428,14 @@ export const ChannelsPage: React.FC = () => {
 
                     {!isDisconnected && (
                       <button
-                        onClick={() => handleDisconnect(channel)}
+                        onClick={() => {
+                          setChannelToDisconnect(channel);
+                          setDisconnectError(null);
+                        }}
                         disabled={disconnectingId === channel.id}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-red-600 hover:text-red-700 hover:bg-red-50 disabled:opacity-50 transition-colors shadow-sm"
                       >
-                        {disconnectingId === channel.id ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <PowerOff className="w-3.5 h-3.5" />
-                        )}
+                        <PowerOff className="w-3.5 h-3.5" />
                         <span>Disconnect</span>
                       </button>
                     )}
@@ -682,6 +682,38 @@ export const ChannelsPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Disconnect Channel Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={Boolean(channelToDisconnect)}
+        title="Disconnect WhatsApp Channel"
+        icon={<PowerOff className="w-4 h-4" />}
+        message={
+          channelToDisconnect ? (
+            <div className="space-y-2">
+              <p>
+                Disconnect this channel{" "}
+                <strong className="text-crm-text font-mono">
+                  {channelToDisconnect.phoneNumber || channelToDisconnect.phoneNumberId || channelToDisconnect.id}
+                </strong>?
+              </p>
+              <p className="text-[11px] text-crm-textMuted">
+                Existing templates and campaigns will be preserved but this channel can no longer send messages.
+              </p>
+            </div>
+          ) : null
+        }
+        confirmLabel="Disconnect Channel"
+        cancelLabel="Cancel"
+        isDestructive={true}
+        isLoading={Boolean(channelToDisconnect && disconnectingId === channelToDisconnect.id)}
+        error={disconnectError}
+        onConfirm={handleConfirmDisconnect}
+        onCancel={() => {
+          setChannelToDisconnect(null);
+          setDisconnectError(null);
+        }}
+      />
     </div>
   );
 };

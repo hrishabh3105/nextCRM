@@ -18,6 +18,7 @@ export const conversationsRouter = Router();
  * GET /
  * Lists conversations for the authenticated workspace.
  * Ordered by updatedAt desc, max 50 items.
+ * Computes `unread: boolean`: true if lastInboundAt is not null AND (lastReadAt is null OR lastInboundAt > lastReadAt).
  */
 conversationsRouter.get(
   "/",
@@ -27,7 +28,54 @@ conversationsRouter.get(
       take: 50,
     });
 
-    res.status(200).json(conversations);
+    const withUnread = conversations.map((conv) => {
+      const unread =
+        conv.lastInboundAt !== null &&
+        (conv.lastReadAt === null || conv.lastInboundAt > conv.lastReadAt);
+
+      return {
+        ...conv,
+        unread,
+      };
+    });
+
+    res.status(200).json(withUnread);
+  })
+);
+
+/**
+ * POST /:id/mark-read
+ * Sets lastReadAt to now() for the given conversation.
+ * Returns the updated conversation.
+ */
+conversationsRouter.post(
+  "/:id/mark-read",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+
+    const conversation = await db.conversation.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!conversation) {
+      throw new ApiError(404, "Conversation not found");
+    }
+
+    const updated = await db.conversation.update({
+      where: { id: req.params.id },
+      data: {
+        lastReadAt: new Date(),
+      },
+    });
+
+    const unread =
+      updated.lastInboundAt !== null &&
+      (updated.lastReadAt === null || updated.lastInboundAt > updated.lastReadAt);
+
+    res.status(200).json({
+      ...updated,
+      unread,
+    });
   })
 );
 

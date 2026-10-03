@@ -17,23 +17,62 @@ usageRouter.get(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)
     );
 
-    const result = await forWorkspace(req.workspaceId!).messageCost.aggregate({
-      where: {
-        createdAt: {
-          gte: periodStart,
-        },
-      },
-      _sum: {
-        billedAmount: true,
-      },
-      _count: true,
-    });
+    const db = forWorkspace(req.workspaceId!);
+
+    const [aggregateResult, firstCostRow, categoryBreakdown] =
+      await Promise.all([
+        db.messageCost.aggregate({
+          where: {
+            createdAt: {
+              gte: periodStart,
+            },
+          },
+          _sum: {
+            billedAmount: true,
+          },
+          _count: true,
+        }),
+        db.messageCost.findFirst({
+          where: {
+            createdAt: {
+              gte: periodStart,
+            },
+          },
+          select: {
+            currency: true,
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        }),
+        db.messageCost.groupBy({
+          by: ["category"],
+          where: {
+            createdAt: {
+              gte: periodStart,
+            },
+          },
+          _sum: {
+            billedAmount: true,
+          },
+          _count: true,
+        }),
+      ]);
+
+    const currency = firstCostRow?.currency || "INR";
+
+    const byCategory = categoryBreakdown.map((item) => ({
+      category: item.category,
+      totalSpend: item._sum.billedAmount ?? 0,
+      messageCount: item._count,
+    }));
 
     res.status(200).json({
-      totalSpend: result._sum.billedAmount ?? 0,
-      messageCount: result._count,
-      currency: "USD",
+      totalSpend: aggregateResult._sum.billedAmount ?? 0,
+      messageCount: aggregateResult._count,
+      currency,
       periodStart,
+      byCategory,
     });
   })
 );

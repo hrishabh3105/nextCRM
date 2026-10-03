@@ -197,6 +197,7 @@ model Conversation {
   contactId       String    @map("contact_id")
   channelId       String    @map("channel_id")
   lastInboundAt   DateTime? @map("last_inbound_at")
+  lastReadAt      DateTime? @map("last_read_at")
   windowExpiresAt DateTime? @map("window_expires_at")
   status          String    @default("open")
   createdAt       DateTime  @default(now()) @map("created_at")

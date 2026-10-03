@@ -17,8 +17,10 @@ export interface Conversation {
   contactId: string;
   channelId: string;
   lastInboundAt?: string | null;
+  lastReadAt?: string | null;
   windowExpiresAt?: string | null;
   status: string;
+  unread?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -122,68 +124,127 @@ export const ConversationsPage: React.FC = () => {
   }, [messages]);
 
   // Fetch conversations list
-  const fetchConversations = useCallback(async (isManual = false) => {
-    if (isManual) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-    setError(null);
-
-    try {
-      const [convData, contactData] = await Promise.all([
-        api.get<Conversation[]>("/api/v1/conversations"),
-        api.get<Contact[]>("/api/v1/contacts"),
-      ]);
-      setConversations(convData);
-      setContacts(contactData);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message);
-      } else if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Failed to load conversations.");
+  const fetchConversations = useCallback(
+    async (isManual = false, isBackground = false) => {
+      if (isManual) {
+        setRefreshing(true);
+      } else if (!isBackground) {
+        setLoading(true);
       }
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      setError(null);
 
+      try {
+        const [convData, contactData] = await Promise.all([
+          api.get<Conversation[]>("/api/v1/conversations"),
+          api.get<Contact[]>("/api/v1/contacts"),
+        ]);
+        setConversations(convData);
+        setContacts(contactData);
+      } catch (err) {
+        if (!isBackground) {
+          if (err instanceof ApiError) {
+            setError(err.message);
+          } else if (err instanceof Error) {
+            setError(err.message);
+          } else {
+            setError("Failed to load conversations.");
+          }
+        }
+      } finally {
+        if (!isBackground) {
+          setLoading(false);
+        }
+        setRefreshing(false);
+      }
+    },
+    []
+  );
+
+  // Poll GET /conversations every 5 seconds (cleaned up on unmount)
   useEffect(() => {
     fetchConversations();
+
+    const intervalId = setInterval(() => {
+      fetchConversations(false, true);
+    }, 5000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
   }, [fetchConversations]);
 
   // Fetch messages for a specific conversation
-  const fetchMessages = useCallback(async (conversationId: string) => {
-    setMessagesLoading(true);
-    setMessagesError(null);
-    setSendError(null);
-
-    try {
-      const data = await api.get<Message[]>(`/api/v1/conversations/${conversationId}/messages`);
-      setMessages(data);
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setMessagesError(err.message);
-      } else if (err instanceof Error) {
-        setMessagesError(err.message);
-      } else {
-        setMessagesError("Failed to load messages.");
+  const fetchMessages = useCallback(
+    async (conversationId: string, isBackground = false) => {
+      if (!isBackground) {
+        setMessagesLoading(true);
+        setMessagesError(null);
+        setSendError(null);
       }
-    } finally {
-      setMessagesLoading(false);
+
+      try {
+        const data = await api.get<Message[]>(
+          `/api/v1/conversations/${conversationId}/messages`
+        );
+        setMessages(data);
+      } catch (err) {
+        if (!isBackground) {
+          if (err instanceof ApiError) {
+            setMessagesError(err.message);
+          } else if (err instanceof Error) {
+            setMessagesError(err.message);
+          } else {
+            setMessagesError("Failed to load messages.");
+          }
+        }
+      } finally {
+        if (!isBackground) {
+          setMessagesLoading(false);
+        }
+      }
+    },
+    []
+  );
+
+  // When a conversation is opened (clicked into), call POST /:id/mark-read immediately,
+  // and manage the 5-second polling interval for open-thread messages
+  const openConversation = useCallback(async (convId: string) => {
+    setSelectedId(convId);
+
+    // Call POST /:id/mark-read immediately and update unread indicator in local state
+    try {
+      await api.post(`/api/v1/conversations/${convId}/mark-read`);
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === convId
+            ? { ...c, unread: false, lastReadAt: new Date().toISOString() }
+            : c
+        )
+      );
+    } catch {
+      // Silently catch read-marking failure
     }
   }, []);
 
-  // When selection changes, load messages
+  // Poll GET /:id/messages every 5 seconds while it's the open thread
+  // Automatically stops polling when a different conversation is selected or the page is left
   useEffect(() => {
-    if (selectedId) {
-      fetchMessages(selectedId);
-    } else {
+    if (!selectedId) {
       setMessages([]);
+      return;
     }
+
+    // Initial load
+    fetchMessages(selectedId);
+
+    // 5-second poll for the active thread
+    const intervalId = setInterval(() => {
+      fetchMessages(selectedId, true);
+    }, 5000);
+
+    return () => {
+      clearInterval(intervalId);
+    };
   }, [selectedId, fetchMessages]);
 
   // Contact lookup map
@@ -366,7 +427,7 @@ export const ConversationsPage: React.FC = () => {
                 return (
                   <button
                     key={conv.id}
-                    onClick={() => setSelectedId(conv.id)}
+                    onClick={() => openConversation(conv.id)}
                     className={`w-full text-left p-3.5 transition-colors flex items-start gap-3 relative ${
                       isSelected
                         ? "bg-crm-elevated/70 border-l-[3px] border-l-crm-accent"
@@ -374,23 +435,53 @@ export const ConversationsPage: React.FC = () => {
                     }`}
                   >
                     {/* Contact Avatar Circle */}
-                    <div className="w-8 h-8 rounded-full bg-crm-accentSubtle border border-crm-accentBorder flex items-center justify-center text-crm-accent flex-shrink-0 font-heading font-semibold text-xs mt-0.5">
+                    <div className="w-8 h-8 rounded-full bg-crm-accentSubtle border border-crm-accentBorder flex items-center justify-center text-crm-accent flex-shrink-0 font-heading font-semibold text-xs mt-0.5 relative">
                       {contact?.name ? contact.name.charAt(0).toUpperCase() : <User className="w-3.5 h-3.5" />}
+                      {conv.unread && (
+                        <span
+                          className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-crm-accent rounded-full border-2 border-white"
+                          title="Unread message"
+                        />
+                      )}
                     </div>
 
                     {/* Metadata */}
                     <div className="min-w-0 flex-1 space-y-1">
                       <div className="flex items-center justify-between gap-1">
-                        <span className="text-xs font-semibold text-crm-text truncate">
-                          {contact?.name || contact?.phone || "Customer"}
-                        </span>
-                        <span className="text-[10px] font-mono text-crm-textMuted flex-shrink-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {conv.unread && (
+                            <span
+                              className="w-2 h-2 rounded-full bg-crm-accent flex-shrink-0"
+                              title="Unread"
+                            />
+                          )}
+                          <span
+                            className={`text-xs truncate ${
+                              conv.unread
+                                ? "font-bold text-crm-text"
+                                : "font-medium text-crm-text"
+                            }`}
+                          >
+                            {contact?.name || contact?.phone || "Customer"}
+                          </span>
+                        </div>
+                        <span
+                          className={`text-[10px] font-mono flex-shrink-0 ${
+                            conv.unread
+                              ? "font-semibold text-crm-accent"
+                              : "text-crm-textMuted"
+                          }`}
+                        >
                           {timeStr}
                         </span>
                       </div>
 
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-mono text-crm-textSecondary truncate">
+                        <span
+                          className={`text-[11px] font-mono truncate ${
+                            conv.unread ? "text-crm-text font-medium" : "text-crm-textSecondary"
+                          }`}
+                        >
                           {contact?.phone || "No phone"}
                         </span>
 

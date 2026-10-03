@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { api, ApiError } from "../lib/api";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   Megaphone,
   Plus,
@@ -750,7 +751,7 @@ export const CampaignsPage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-5">
+    <div className="max-w-7xl mx-auto space-y-5">
       {/* Top Header & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -1609,38 +1610,14 @@ export const CampaignsPage: React.FC = () => {
         </div>
       )}
 
-      {/* Delete Campaign Confirmation Modal */}
-      {campaignToDelete && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
-          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-md p-6 relative">
-            <div className="flex items-center justify-between pb-4 border-b border-crm-border">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-md bg-red-50 border border-red-200 flex items-center justify-center text-red-600">
-                  <Trash2 className="w-4 h-4" />
-                </div>
-                <h2 className="text-sm font-heading font-semibold text-crm-text">
-                  Delete Campaign
-                </h2>
-              </div>
-              <button
-                onClick={() => {
-                  setCampaignToDelete(null);
-                  setDeleteError(null);
-                }}
-                className="text-crm-textMuted hover:text-crm-text p-1 rounded transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {deleteError && (
-              <div className="mt-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                <span>{deleteError}</span>
-              </div>
-            )}
-
-            <div className="mt-4 space-y-2 text-xs text-crm-textSecondary">
+      {/* Delete Campaign Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={Boolean(campaignToDelete)}
+        title="Delete Campaign"
+        icon={<Trash2 className="w-4 h-4" />}
+        message={
+          campaignToDelete ? (
+            <div className="space-y-2">
               <p>
                 Are you sure you want to permanently delete the draft campaign{" "}
                 <strong className="text-crm-text">&quot;{campaignToDelete.name}&quot;</strong>?
@@ -1649,70 +1626,28 @@ export const CampaignsPage: React.FC = () => {
                 This action cannot be undone. Only draft campaigns with zero recipients can be deleted.
               </p>
             </div>
+          ) : null
+        }
+        confirmLabel="Delete Campaign"
+        cancelLabel="Cancel"
+        isDestructive={true}
+        isLoading={deleteLoading}
+        error={deleteError}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          setCampaignToDelete(null);
+          setDeleteError(null);
+        }}
+      />
 
-            <div className="mt-6 pt-3 border-t border-crm-border flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setCampaignToDelete(null);
-                  setDeleteError(null);
-                }}
-                className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={deleteLoading}
-                onClick={handleConfirmDelete}
-                className="px-4 py-1.5 rounded-md bg-red-600 hover:bg-red-700 text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
-              >
-                {deleteLoading ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Deleting...</span>
-                  </>
-                ) : (
-                  <span>Delete Campaign</span>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Cancel Campaign Confirmation Modal */}
-      {campaignToCancel && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
-          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-md p-6 relative">
-            <div className="flex items-center justify-between pb-4 border-b border-crm-border">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-md bg-red-50 border border-red-200 flex items-center justify-center text-red-600">
-                  <XCircle className="w-4 h-4" />
-                </div>
-                <h2 className="text-sm font-heading font-semibold text-crm-text">
-                  Cancel Campaign
-                </h2>
-              </div>
-              <button
-                onClick={() => {
-                  setCampaignToCancel(null);
-                  setCancelError(null);
-                }}
-                className="text-crm-textMuted hover:text-crm-text p-1 rounded transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {cancelError && (
-              <div className="mt-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                <span>{cancelError}</span>
-              </div>
-            )}
-
-            <div className="mt-4 space-y-2 text-xs text-crm-textSecondary">
+      {/* Cancel Campaign Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={Boolean(campaignToCancel)}
+        title="Cancel Campaign"
+        icon={<XCircle className="w-4 h-4" />}
+        message={
+          campaignToCancel ? (
+            <div className="space-y-2">
               <p>
                 Are you sure you want to cancel the in-progress campaign{" "}
                 <strong className="text-crm-text">&quot;{campaignToCancel.name}&quot;</strong>?
@@ -1721,37 +1656,19 @@ export const CampaignsPage: React.FC = () => {
                 This will immediately stop any further outbound messages. Messages already sent cannot be recalled, and remaining recipients will be skipped.
               </p>
             </div>
-
-            <div className="mt-6 pt-3 border-t border-crm-border flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setCampaignToCancel(null);
-                  setCancelError(null);
-                }}
-                className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
-              >
-                Keep running
-              </button>
-              <button
-                type="button"
-                disabled={cancelLoading}
-                onClick={handleConfirmCancel}
-                className="px-4 py-1.5 rounded-md bg-red-600 hover:bg-red-700 text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
-              >
-                {cancelLoading ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Cancelling...</span>
-                  </>
-                ) : (
-                  <span>Cancel Campaign</span>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          ) : null
+        }
+        confirmLabel="Cancel Campaign"
+        cancelLabel="Keep running"
+        isDestructive={true}
+        isLoading={cancelLoading}
+        error={cancelError}
+        onConfirm={handleConfirmCancel}
+        onCancel={() => {
+          setCampaignToCancel(null);
+          setCancelError(null);
+        }}
+      />
     </div>
   );
 };

@@ -12,26 +12,30 @@ import { prisma } from "../src";
 async function main() {
   console.log("Seeding initial RateCard entries for country 'IN'...");
 
+  // NOTE: This corrects a mislabeling bug from the original Week 4 seed data.
+  // These rate values (utility: 0.115, marketing: 0.86, authentication: 0.115) were always
+  // rupee-scale (INR), not dollar-scale (USD). True USD rates would be roughly 0.0014 and 0.0118.
+  // The numeric rate values are kept as-is, only the currency label is corrected to 'INR'.
   const initialRates = [
     {
       country: "IN",
       category: "utility",
       rate: 0.115,
-      currency: "USD",
+      currency: "INR",
       effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
     },
     {
       country: "IN",
       category: "marketing",
       rate: 0.86,
-      currency: "USD",
+      currency: "INR",
       effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
     },
     {
       country: "IN",
       category: "authentication",
       rate: 0.115,
-      currency: "USD",
+      currency: "INR",
       effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
     },
   ];
@@ -46,9 +50,22 @@ async function main() {
     });
 
     if (existing) {
-      console.log(
-        `Rate card already exists: id=${existing.id}, country=${existing.country}, category=${existing.category}, rate=${existing.rate}, currency=${existing.currency}, effectiveFrom=${existing.effectiveFrom.toISOString()}`
-      );
+      if (existing.currency !== item.currency || existing.rate !== item.rate) {
+        const updated = await prisma.rateCard.update({
+          where: { id: existing.id },
+          data: {
+            rate: item.rate,
+            currency: item.currency,
+          },
+        });
+        console.log(
+          `Updated rate card: id=${updated.id}, country=${updated.country}, category=${updated.category}, rate=${updated.rate}, currency=${updated.currency}, effectiveFrom=${updated.effectiveFrom.toISOString()}`
+        );
+      } else {
+        console.log(
+          `Rate card already exists: id=${existing.id}, country=${existing.country}, category=${existing.category}, rate=${existing.rate}, currency=${existing.currency}, effectiveFrom=${existing.effectiveFrom.toISOString()}`
+        );
+      }
     } else {
       const created = await prisma.rateCard.create({
         data: item,

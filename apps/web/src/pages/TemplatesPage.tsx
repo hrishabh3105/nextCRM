@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { api, ApiError } from "../lib/api";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   FileText,
   Plus,
@@ -556,7 +557,7 @@ export const TemplatesPage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-5">
+    <div className="max-w-7xl mx-auto space-y-5">
       {/* Top Header & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -1495,38 +1496,14 @@ export const TemplatesPage: React.FC = () => {
         </div>
       )}
 
-      {/* Delete Draft Template Confirmation Modal */}
-      {templateToDelete && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
-          <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-md p-6 relative">
-            <div className="flex items-center justify-between pb-4 border-b border-crm-border">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-md bg-red-50 border border-red-200 flex items-center justify-center text-red-600">
-                  <Trash2 className="w-4 h-4" />
-                </div>
-                <h2 className="text-sm font-heading font-semibold text-crm-text">
-                  Delete Draft Template
-                </h2>
-              </div>
-              <button
-                onClick={() => {
-                  setTemplateToDelete(null);
-                  setDeleteError(null);
-                }}
-                className="text-crm-textMuted hover:text-crm-text p-1 rounded transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {deleteError && (
-              <div className="mt-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                <span>{deleteError}</span>
-              </div>
-            )}
-
-            <div className="mt-4 space-y-2 text-xs text-crm-textSecondary">
+      {/* Delete Draft Template Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={Boolean(templateToDelete)}
+        title="Delete Draft Template"
+        icon={<Trash2 className="w-4 h-4" />}
+        message={
+          templateToDelete ? (
+            <div className="space-y-2">
               <p>
                 Are you sure you want to permanently delete the draft template{" "}
                 <strong className="text-crm-text font-mono">&quot;{templateToDelete.providerName}&quot;</strong>?
@@ -1535,37 +1512,19 @@ export const TemplatesPage: React.FC = () => {
                 This action cannot be undone. Only unsubmitted draft templates not referenced by any campaign can be deleted.
               </p>
             </div>
-
-            <div className="mt-6 pt-3 border-t border-crm-border flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setTemplateToDelete(null);
-                  setDeleteError(null);
-                }}
-                className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={deleteLoading}
-                onClick={handleConfirmDelete}
-                className="px-4 py-1.5 rounded-md bg-red-600 hover:bg-red-700 text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
-              >
-                {deleteLoading ? (
-                  <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>Deleting...</span>
-                  </>
-                ) : (
-                  <span>Delete Template</span>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          ) : null
+        }
+        confirmLabel="Delete Template"
+        cancelLabel="Cancel"
+        isDestructive={true}
+        isLoading={deleteLoading}
+        error={deleteError}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => {
+          setTemplateToDelete(null);
+          setDeleteError(null);
+        }}
+      />
     </div>
   );
 };

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import { api, ApiError } from "../lib/api";
 import {
   DollarSign,
+  IndianRupee,
   Send,
   Calendar,
   RefreshCw,
@@ -12,11 +13,18 @@ import {
   Info,
 } from "lucide-react";
 
+export interface CategorySpend {
+  category: string;
+  totalSpend: number | string;
+  messageCount: number;
+}
+
 export interface UsageCosts {
   totalSpend: string | number;
   messageCount: number;
   currency: string;
   periodStart: string;
+  byCategory?: CategorySpend[];
 }
 
 function formatPeriodStart(dateStr: string): string {
@@ -32,15 +40,15 @@ function formatPeriodStart(dateStr: string): string {
   }
 }
 
-function formatCurrency(amount: number, currency = "USD"): string {
-  // If fractional cents exist (e.g. $0.115 or $0.0325), display up to 4 decimal places
+function formatCurrency(amount: number, currency = "INR"): string {
+  // If fractional subunit exists (e.g. ₹0.115 or $0.0325), display up to 4 decimal places
   const hasSubCentFraction = (amount * 100) % 1 !== 0;
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency,
+  const symbol = currency === "INR" ? "₹" : "$";
+  const formattedNumber = new Intl.NumberFormat(currency === "INR" ? "en-IN" : "en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: hasSubCentFraction ? 4 : 2,
   }).format(amount);
+  return `${symbol}${formattedNumber}`;
 }
 
 export const UsagePage: React.FC = () => {
@@ -86,13 +94,13 @@ export const UsagePage: React.FC = () => {
     : 0;
 
   const messageCount = data?.messageCount ?? 0;
-  const currency = data?.currency || "USD";
+  const currency = data?.currency || "INR";
   const periodStart = data?.periodStart;
 
   const avgCostPerMessage = messageCount > 0 ? numericSpend / messageCount : 0;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="max-w-7xl mx-auto space-y-6">
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded-xl bg-crm-surface border border-crm-border shadow-sm">
         <div>
@@ -151,7 +159,11 @@ export const UsagePage: React.FC = () => {
                   Total Spend (MTD)
                 </span>
                 <div className="w-7 h-7 rounded-md bg-crm-accentSubtle border border-crm-accentBorder flex items-center justify-center text-crm-accent">
-                  <DollarSign className="w-4 h-4" />
+                  {currency === "INR" ? (
+                    <IndianRupee className="w-4 h-4" />
+                  ) : (
+                    <DollarSign className="w-4 h-4" />
+                  )}
                 </div>
               </div>
 
@@ -226,6 +238,63 @@ export const UsagePage: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Category Cost Breakdown */}
+          {data?.byCategory && data.byCategory.length > 0 && (
+            <div className="rounded-xl bg-crm-surface border border-crm-border shadow-sm overflow-hidden">
+              <div className="p-5 border-b border-crm-border flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-heading font-semibold text-crm-text tracking-tight">
+                    Cost Breakdown by Category
+                  </h2>
+                  <p className="text-xs text-crm-textSecondary mt-0.5">
+                    Messages billed and spend categorized by Meta conversation type.
+                  </p>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-crm-border bg-crm-elevated/40 text-[11px] font-mono uppercase text-crm-textSecondary">
+                      <th className="py-2.5 px-5 font-medium">Category</th>
+                      <th className="py-2.5 px-5 font-medium text-right">Messages Billed</th>
+                      <th className="py-2.5 px-5 font-medium text-right">Total Spend</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-crm-border text-xs text-crm-text">
+                    {data.byCategory.map((item) => {
+                      const itemSpend =
+                        typeof item.totalSpend === "number"
+                          ? item.totalSpend
+                          : parseFloat(String(item.totalSpend || "0")) || 0;
+
+                      const categoryLabel =
+                        item.category.charAt(0).toUpperCase() +
+                        item.category.slice(1).toLowerCase();
+
+                      return (
+                        <tr
+                          key={item.category}
+                          className="hover:bg-crm-elevated/30 transition-colors"
+                        >
+                          <td className="py-3 px-5 font-medium text-crm-text">
+                            <span className="capitalize">{categoryLabel}</span>
+                          </td>
+                          <td className="py-3 px-5 font-mono text-right text-crm-textSecondary">
+                            {item.messageCount.toLocaleString()}
+                          </td>
+                          <td className="py-3 px-5 font-mono font-medium text-right text-crm-text">
+                            {formatCurrency(itemSpend, currency)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* Pricing Info & Guidance Card */}
           <div className="p-5 rounded-xl bg-crm-surface border border-crm-border shadow-sm space-y-3">

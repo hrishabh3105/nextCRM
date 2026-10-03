@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { api } from "../lib/api";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   FriendlyStep,
   flattenToEngineSteps,
@@ -231,10 +232,10 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
             {/* Step Body */}
             {step.kind === "wait" && (
               <div className="space-y-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] font-medium text-crm-textSecondary mb-1">
-                      Wait Duration Amount
+                <div className="flex flex-wrap items-start gap-2.5">
+                  <div className="flex-1 min-w-[120px]">
+                    <label className="block text-[11px] font-medium text-crm-textSecondary mb-1 whitespace-nowrap">
+                      Duration Amount
                     </label>
                     <input
                       type="number"
@@ -249,8 +250,8 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                       className="w-full px-2.5 py-1.5 text-xs bg-crm-surface border border-crm-border rounded focus:outline-none focus:border-crm-accent"
                     />
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-medium text-crm-textSecondary mb-1">
+                  <div className="flex-1 min-w-[120px]">
+                    <label className="block text-[11px] font-medium text-crm-textSecondary mb-1 whitespace-nowrap">
                       Time Unit
                     </label>
                     <select
@@ -349,7 +350,13 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                   Condition evaluation: branches diverge based on whether the condition check is met.
                 </p>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div
+                  className={
+                    depth === 0
+                      ? "grid grid-cols-1 md:grid-cols-2 gap-3"
+                      : "flex flex-col gap-3"
+                  }
+                >
                   {/* If Yes Branch */}
                   <div className="border border-emerald-200 bg-emerald-50/30 rounded-lg p-2.5">
                     <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-800 mb-2 pb-1 border-b border-emerald-200/60">
@@ -464,6 +471,11 @@ export const JourneysPage: React.FC = () => {
 
   // Action status per journey (pause / activate)
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [confirmJourneyAction, setConfirmJourneyAction] = useState<{
+    journey: Journey;
+    action: "pause" | "activate";
+  } | null>(null);
+  const [confirmActionLoading, setConfirmActionLoading] = useState<boolean>(false);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -502,34 +514,30 @@ export const JourneysPage: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
-  // Handle Pause
-  const handlePause = async (journey: Journey) => {
-    setActionLoading((prev) => ({ ...prev, [journey.id]: true }));
-    setError(null);
-    setSuccessMessage(null);
-    try {
-      await api.post(`/api/v1/journeys/${journey.id}/pause`);
-      setSuccessMessage(`Journey "${journey.name}" has been paused.`);
-      await fetchData();
-    } catch (err: any) {
-      setError(err?.message || "Failed to pause journey");
-    } finally {
-      setActionLoading((prev) => ({ ...prev, [journey.id]: false }));
-    }
-  };
+  // Handle Confirmed Journey Lifecycle Action (Pause or Activate)
+  const handleExecuteJourneyAction = async () => {
+    if (!confirmJourneyAction) return;
+    const { journey, action } = confirmJourneyAction;
 
-  // Handle Activate
-  const handleActivate = async (journey: Journey) => {
+    setConfirmActionLoading(true);
     setActionLoading((prev) => ({ ...prev, [journey.id]: true }));
     setError(null);
     setSuccessMessage(null);
+
     try {
-      await api.post(`/api/v1/journeys/${journey.id}/activate`);
-      setSuccessMessage(`Journey "${journey.name}" is now active.`);
+      if (action === "pause") {
+        await api.post(`/api/v1/journeys/${journey.id}/pause`);
+        setSuccessMessage(`Journey "${journey.name}" has been paused.`);
+      } else {
+        await api.post(`/api/v1/journeys/${journey.id}/activate`);
+        setSuccessMessage(`Journey "${journey.name}" is now active.`);
+      }
+      setConfirmJourneyAction(null);
       await fetchData();
     } catch (err: any) {
-      setError(err?.message || "Failed to activate journey");
+      setError(err?.message || `Failed to ${action} journey`);
     } finally {
+      setConfirmActionLoading(false);
       setActionLoading((prev) => ({ ...prev, [journey.id]: false }));
     }
   };
@@ -594,7 +602,7 @@ export const JourneysPage: React.FC = () => {
   }, [journeys, searchQuery]);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-crm-bg p-6">
+    <div className="max-w-7xl mx-auto">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
@@ -749,7 +757,7 @@ export const JourneysPage: React.FC = () => {
                       {journey.status === "active" ? (
                         <button
                           type="button"
-                          onClick={() => handlePause(journey)}
+                          onClick={() => setConfirmJourneyAction({ journey, action: "pause" })}
                           disabled={isActionBusy}
                           className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 rounded hover:bg-amber-100 transition-colors disabled:opacity-50"
                         >
@@ -763,7 +771,7 @@ export const JourneysPage: React.FC = () => {
                       ) : (
                         <button
                           type="button"
-                          onClick={() => handleActivate(journey)}
+                          onClick={() => setConfirmJourneyAction({ journey, action: "activate" })}
                           disabled={isActionBusy}
                           className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-300 rounded hover:bg-emerald-100 transition-colors disabled:opacity-50"
                         >
@@ -897,6 +905,56 @@ export const JourneysPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Confirm Pause / Activate Journey Lifecycle Dialog */}
+      <ConfirmDialog
+        isOpen={Boolean(confirmJourneyAction)}
+        title={
+          confirmJourneyAction?.action === "pause"
+            ? "Pause Automated Journey"
+            : "Activate Automated Journey"
+        }
+        icon={
+          confirmJourneyAction?.action === "pause" ? (
+            <Pause className="w-4 h-4 text-red-600" />
+          ) : (
+            <Play className="w-4 h-4 text-crm-accent" />
+          )
+        }
+        message={
+          confirmJourneyAction ? (
+            confirmJourneyAction.action === "pause" ? (
+              <div className="space-y-2">
+                <p>
+                  Are you sure you want to pause journey{" "}
+                  <strong className="text-crm-text">&quot;{confirmJourneyAction.journey.name}&quot;</strong>?
+                </p>
+                <p className="text-[11px] text-crm-textMuted">
+                  Automated follow-ups and recovery messages will be suspended for new and in-flight store events until reactivated.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p>
+                  Activate automated journey{" "}
+                  <strong className="text-crm-text">&quot;{confirmJourneyAction.journey.name}&quot;</strong>?
+                </p>
+                <p className="text-[11px] text-crm-textMuted">
+                  Incoming store events matching this trigger will immediately begin entering this automated sequence.
+                </p>
+              </div>
+            )
+          ) : null
+        }
+        confirmLabel={
+          confirmJourneyAction?.action === "pause" ? "Pause Journey" : "Activate Journey"
+        }
+        cancelLabel={confirmJourneyAction?.action === "pause" ? "Keep Active" : "Cancel"}
+        isDestructive={confirmJourneyAction?.action === "pause"}
+        isLoading={confirmActionLoading}
+        onConfirm={handleExecuteJourneyAction}
+        onCancel={() => setConfirmJourneyAction(null)}
+      />
     </div>
   );
 };
