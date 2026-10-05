@@ -1,23 +1,4 @@
-import crypto from "crypto";
 import { ApiError } from "../apiError";
-
-/**
- * Safety Guard: Refuse to start if LOAD_TEST_MODE is enabled in production.
- *
- * Why this guard exists:
- * LOAD_TEST_MODE bypasses real network calls to Meta's Graph API in sendTemplateMessage,
- * simulating message sending with synthetic IDs and simulated latency. If this mode
- * were accidentally enabled in a production environment, real customer notifications
- * would silently never be dispatched to WhatsApp, causing severe data inconsistency
- * and customer communication loss while pretending the messages were successfully sent.
- * Failing fast at startup prevents this catastrophic misconfiguration.
- */
-if (process.env.LOAD_TEST_MODE === "true") {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("LOAD_TEST_MODE cannot be enabled in production! Refusing to start.");
-  }
-  console.warn("LOAD_TEST_MODE is ON — Meta sends are stubbed");
-}
 
 const META_GRAPH_BASE_URL = "https://graph.facebook.com/v20.0";
 
@@ -345,24 +326,6 @@ export async function sendTemplateMessage(params: {
   language: string;
   variables: string[];
 }): Promise<{ providerMessageId: string }> {
-  if (process.env.LOAD_TEST_MODE === "true") {
-    const minLatency = process.env.LOAD_TEST_MIN_LATENCY_MS
-      ? parseInt(process.env.LOAD_TEST_MIN_LATENCY_MS, 10) || 40
-      : 40;
-    const maxLatency = process.env.LOAD_TEST_MAX_LATENCY_MS
-      ? parseInt(process.env.LOAD_TEST_MAX_LATENCY_MS, 10) || 120
-      : 120;
-    const low = Math.min(minLatency, maxLatency);
-    const high = Math.max(minLatency, maxLatency);
-    const latency = Math.floor(Math.random() * (high - low + 1)) + low;
-
-    await new Promise((resolve) => setTimeout(resolve, latency));
-
-    return {
-      providerMessageId: `wamid.LOADTEST.${crypto.randomUUID()}`,
-    };
-  }
-
   const { accessToken, phoneNumberId, to, templateName, language, variables } = params;
 
   const components =
