@@ -13,6 +13,29 @@ import {
 } from "@nextcrm/core";
 import { SendMessageJobData } from "./campaignDispatchWorker";
 
+const DEFAULT_CONCURRENCY = 1;
+const DEFAULT_RATE_LIMIT_PER_SEC = 20;
+
+const parsedConcurrency = process.env.SEND_MESSAGE_CONCURRENCY
+  ? parseInt(process.env.SEND_MESSAGE_CONCURRENCY, 10)
+  : NaN;
+const concurrency =
+  !Number.isNaN(parsedConcurrency) && parsedConcurrency > 0
+    ? parsedConcurrency
+    : DEFAULT_CONCURRENCY;
+
+const parsedRateLimit = process.env.SEND_RATE_LIMIT_PER_SEC
+  ? parseInt(process.env.SEND_RATE_LIMIT_PER_SEC, 10)
+  : NaN;
+const rateLimitMax =
+  !Number.isNaN(parsedRateLimit) && parsedRateLimit > 0
+    ? parsedRateLimit
+    : DEFAULT_RATE_LIMIT_PER_SEC;
+
+console.log(
+  `[send-message] Worker startup configuration: concurrency=${concurrency}, rateLimitMax=${rateLimitMax}/s`
+);
+
 /**
  * BullMQ Worker for SEND_MESSAGE_QUEUE.
  * Processes individual contact message delivery using Meta Cloud API.
@@ -270,8 +293,9 @@ export const sendMessageWorker = new Worker<SendMessageJobData>(
   },
   {
     connection: redisConnection,
+    concurrency,
     limiter: {
-      max: 20,
+      max: rateLimitMax,
       duration: 1000,
     },
   }
