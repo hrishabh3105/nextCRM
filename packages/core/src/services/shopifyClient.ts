@@ -172,11 +172,13 @@ export async function getShopifyAccessToken(
 export async function shopifyGraphQL<T = any>(
   shopDomain: string,
   query: string,
-  variables?: Record<string, any>
+  variables?: Record<string, any>,
+  options?: { timeoutMs?: number }
 ): Promise<T> {
   const shop = shopDomain.trim();
   const apiVersion = process.env.SHOPIFY_API_VERSION || "2026-07";
   const url = `https://${shop}/admin/api/${apiVersion}/graphql.json`;
+  const timeoutMs = options?.timeoutMs ?? 30000;
 
   async function executeRequest(token: string): Promise<Response> {
     return fetch(url, {
@@ -186,7 +188,7 @@ export async function shopifyGraphQL<T = any>(
         "X-Shopify-Access-Token": token,
       },
       body: JSON.stringify({ query, variables }),
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   }
 
@@ -382,3 +384,204 @@ export async function verifyShopifyWebhook(params: {
     return false;
   }
 }
+
+/**
+ * Formats a Shopify customer ID (numeric string/number or GID) into a standardized Shopify GID.
+ */
+export function formatCustomerGid(customerId: string | number): string {
+  const str = String(customerId).trim();
+  if (str.startsWith("gid://shopify/Customer/")) {
+    return str;
+  }
+  const cleanId = str.replace(/^gid:\/\/shopify\/Customer\//, "");
+  return `gid://shopify/Customer/${cleanId}`;
+}
+
+export type ShopifyWhatsAppMarketingState =
+  | "SUBSCRIBED"
+  | "UNSUBSCRIBED"
+  | "NOT_SUBSCRIBED"
+  | "PENDING"
+  | "REDACTED"
+  | string;
+
+export interface CustomerWhatsAppMarketingConsent {
+  state: ShopifyWhatsAppMarketingState;
+  optInLevel?: string | null;
+  updatedAt?: string | null;
+  collectedFrom?: string | null;
+}
+
+export interface CustomerWhatsAppConsentResult {
+  customerGid: string;
+  phoneNumber: string;
+  consent: CustomerWhatsAppMarketingConsent | null;
+  state: ShopifyWhatsAppMarketingState | null;
+  optInLevel?: string | null;
+  updatedAt?: string | null;
+  collectedFrom?: string | null;
+}
+
+interface CustomerWhatsAppConsentCacheEntry {
+  result: CustomerWhatsAppConsentResult | null;
+  expiresAt: number;
+}
+
+const whatsAppConsentCache = new Map<string, CustomerWhatsAppConsentCacheEntry>();
+const whatsAppConsentInFlight = new Map<string, Promise<CustomerWhatsAppConsentResult | null>>();
+
+/**
+ * Clears the customer WhatsApp consent in-memory cache for a specific key or all keys.
+ */
+export function clearCustomerWhatsAppConsentCache(cacheKey?: string): void {
+  if (cacheKey) {
+    whatsAppConsentCache.delete(cacheKey.trim().toLowerCase());
+  } else {
+    whatsAppConsentCache.clear();
+  }
+}
+
+interface CustomerWhatsAppConsentGraphQLResponse {
+  customer?: {
+    id: string;
+    defaultPhoneNumber?: {
+      phoneNumber: string;
+      whatsAppMarketingConsent?: {
+        state: string;
+        optInLevel?: string | null;
+        updatedAt?: string | null;
+        collectedFrom?: string | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+/**
+ * Queries explicit WhatsApp marketing consent for a customer using Shopify Admin GraphQL API.
+ * Uses 2026-07 Admin API schema (Customer.defaultPhoneNumber.whatsAppMarketingConsent).
+ *
+ * In 2026-10 SMS consent moves to CustomerPhoneNumber.smsMarketingConsent; the flat marketingState fields are deprecated. Revisit when bumping the API version.
+ *
+ * Features:
+ * - In-memory cache keyed by `${shop}:${customerGid}` with 60-second TTL.
+ * - Single-flight request deduplication for concurrent lookups.
+ * - 3-second default timeout (configurable up to 5s) to guarantee fast webhook response.
+ * - Returns typed result or null (if customer not found, defaultPhoneNumber is null, or on error/timeout).
+ * - NEVER throws; logs a warning on any error or timeout.
+ */
+export async function getCustomerWhatsAppConsent(
+  shopDomain: string,
+  customerIdOrGid: string | number,
+  options?: { timeoutMs?: number }
+): Promise<CustomerWhatsAppConsentResult | null> {
+  if (!shopDomain || !customerIdOrGid) {
+    return null;
+  }
+
+  const shop = shopDomain.trim().toLowerCase();
+  const customerGid = formatCustomerGid(customerIdOrGid);
+  const cacheKey = `${shop}:${customerGid}`;
+  const now = Date.now();
+
+  const cached = whatsAppConsentCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.result;
+  }
+
+  const inFlight = whatsAppConsentInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const timeoutMs = options?.timeoutMs ?? 3000;
+
+  const requestPromise = (async (): Promise<CustomerWhatsAppConsentResult | null> => {
+    try {
+      // In 2026-10 SMS consent moves to CustomerPhoneNumber.smsMarketingConsent; the flat marketingState fields are deprecated. Revisit when bumping the API version.
+      const query = `
+        query getCustomerWhatsAppConsent($id: ID!) {
+          customer(id: $id) {
+            id
+            defaultPhoneNumber {
+              phoneNumber
+              whatsAppMarketingConsent {
+                state
+                optInLevel
+                updatedAt
+                collectedFrom
+              }
+            }
+          }
+        }
+      `;
+
+      let timerId: NodeJS.Timeout | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timerId = setTimeout(() => {
+          reject(new Error(`getCustomerWhatsAppConsent timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        if (timerId && typeof (timerId as any).unref === "function") {
+          (timerId as any).unref();
+        }
+      });
+
+      let data: CustomerWhatsAppConsentGraphQLResponse | null = null;
+      try {
+        data = await Promise.race([
+          shopifyGraphQL<CustomerWhatsAppConsentGraphQLResponse>(
+            shopDomain,
+            query,
+            { id: customerGid },
+            { timeoutMs }
+          ),
+          timeoutPromise,
+        ]);
+      } finally {
+        if (timerId) {
+          clearTimeout(timerId);
+        }
+      }
+
+      if (!data?.customer || !data.customer.defaultPhoneNumber) {
+        // Customer not found or defaultPhoneNumber is null
+        whatsAppConsentCache.set(cacheKey, {
+          result: null,
+          expiresAt: Date.now() + 60000,
+        });
+        return null;
+      }
+
+      const defaultPhone = data.customer.defaultPhoneNumber;
+      const waConsent = defaultPhone.whatsAppMarketingConsent;
+
+      const result: CustomerWhatsAppConsentResult = {
+        customerGid: data.customer.id || customerGid,
+        phoneNumber: defaultPhone.phoneNumber,
+        consent: waConsent ?? null,
+        state: waConsent?.state ?? null,
+        optInLevel: waConsent?.optInLevel ?? null,
+        updatedAt: waConsent?.updatedAt ?? null,
+        collectedFrom: waConsent?.collectedFrom ?? null,
+      };
+
+      whatsAppConsentCache.set(cacheKey, {
+        result,
+        expiresAt: Date.now() + 60000,
+      });
+
+      return result;
+    } catch (err: any) {
+      console.warn(
+        `[shopifyClient] Failed to fetch customer WhatsApp consent for shop ${shopDomain}, customer ${customerGid}:`,
+        err?.message || err
+      );
+      return null;
+    } finally {
+      whatsAppConsentInFlight.delete(cacheKey);
+    }
+  })();
+
+  whatsAppConsentInFlight.set(cacheKey, requestPromise);
+  return requestPromise;
+}
+

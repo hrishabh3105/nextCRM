@@ -1,4 +1,10 @@
-import { forWorkspace, startMatchingJourneys, setMarketingConsent } from "@nextcrm/core";
+import {
+  forWorkspace,
+  startMatchingJourneys,
+  setMarketingConsent,
+  getCustomerWhatsAppConsent,
+  CustomerWhatsAppConsentResult,
+} from "@nextcrm/core";
 import { normalizePhoneE164, isValidE164 } from "../utils/phone";
 
 /**
@@ -105,6 +111,13 @@ async function resolveOrCreateContact(
   return contact ?? null;
 }
 
+export function maskPhoneLast4(phone?: string | null): string {
+  if (!phone) return "****";
+  const cleaned = String(phone).trim();
+  if (cleaned.length <= 4) return "****";
+  return `...${cleaned.slice(-4)}`;
+}
+
 export interface ProcessShopifyConsentParams {
   db: any;
   contactId: string;
@@ -116,17 +129,25 @@ export interface ProcessShopifyConsentParams {
     shopDomain?: string;
   } | null;
   workspaceId?: string;
+  getWhatsAppConsent?: (
+    shopDomain: string,
+    customerId: string | number
+  ) => Promise<CustomerWhatsAppConsentResult | null>;
 }
 
 /**
- * Processes Shopify SMS marketing consent fields for orders and checkouts.
- * - Extracts SMS consent fields only (NOT email fields like accepts_marketing or buyer_accepts_marketing).
- * - Orders: customer.sms_marketing_consent.state ("subscribed", "not_subscribed", "pending", "unsubscribed", "redacted").
- * - Checkouts: buyer_accepts_sms_marketing === true (and sms_marketing_phone). Also uses customer.sms_marketing_consent if present.
- * - If phone mismatch between consent phone and contact phone: records evidence only, does NOT grant consent, logs warning.
- * - If state is "unsubscribed": moves contact to OPTED_OUT regardless of store setting.
- * - If state is "subscribed": if treatShopifySmsAsWhatsappConsent is true, sets OPTED_IN. If false, records raw state in evidence without granting opt-in.
- * - Absence of a tick ("not_subscribed", "pending", etc.) never downgrades OPTED_IN.
+ * Processes Shopify marketing consent for orders and checkouts.
+ * - Primary: Reads explicit WhatsApp marketing consent via getCustomerWhatsAppConsent (Shopify GraphQL).
+ *   Applies regardless of treatShopifySmsAsWhatsappConsent setting.
+ * - Fallback: Shopify SMS marketing consent fields (controlled by store setting treatShopifySmsAsWhatsappConsent).
+ * - Precedence:
+ *   1. Explicit WhatsApp consent: SUBSCRIBED -> OPTED_IN, UNSUBSCRIBED -> OPTED_OUT (with phone-match check).
+ *   2. If WhatsApp consent is null, NOT_SUBSCRIBED, PENDING, REDACTED, or unknown: falls through to SMS consent.
+ *   3. SMS consent: treatShopifySmsAsWhatsappConsent setting controls whether SMS "subscribed" grants WhatsApp OPTED_IN.
+ *      SMS "unsubscribed" moves contact to OPTED_OUT regardless of setting.
+ *   4. Existing OPTED_OUT via INBOUND_STOP is never overridden; lookup is skipped.
+ *
+ * In 2026-10 SMS consent moves to CustomerPhoneNumber.smsMarketingConsent; the flat marketingState fields are deprecated. Revisit when bumping the API version.
  */
 export async function processShopifyConsent(
   params: ProcessShopifyConsentParams
@@ -143,6 +164,102 @@ export async function processShopifyConsent(
   const shopDomain = storeConnection?.shopDomain;
   const treatAsConsent = storeConnection?.treatShopifySmsAsWhatsappConsent ?? true;
 
+  // 1. PRIMARY: Check explicit WhatsApp consent from Shopify if customer ID and shop domain are available
+  const rawCustomerId = payload?.customer?.id ?? payload?.customer_id;
+  if (rawCustomerId && shopDomain) {
+    const currentContact = await db.contact.findUnique({
+      where: { id: contactId },
+    });
+
+    const isOptedOutViaStop =
+      currentContact?.marketingConsentStatus === "OPTED_OUT" &&
+      currentContact?.marketingConsentSource === "INBOUND_STOP";
+
+    if (!isOptedOutViaStop) {
+      const getConsentFn = params.getWhatsAppConsent ?? getCustomerWhatsAppConsent;
+      let waResult: CustomerWhatsAppConsentResult | null = null;
+      try {
+        waResult = await getConsentFn(shopDomain, rawCustomerId);
+      } catch (err: any) {
+        console.warn(
+          `[shopify-consent] Error fetching customer WhatsApp consent for customer ${rawCustomerId}:`,
+          err?.message || err
+        );
+        waResult = null;
+      }
+
+      if (waResult) {
+        const waRawState = waResult.state ? String(waResult.state).toUpperCase().trim() : "";
+        const waPhone = waResult.phoneNumber;
+        const normalizedWaPhone = waPhone ? normalizePhoneE164(String(waPhone)) : null;
+        const normalizedContactPhone = contactPhone ? normalizePhoneE164(String(contactPhone)) : null;
+        const isPhoneMatch = Boolean(
+          normalizedWaPhone &&
+          normalizedContactPhone &&
+          normalizedWaPhone === normalizedContactPhone
+        );
+
+        if (waRawState === "SUBSCRIBED") {
+          if (isPhoneMatch) {
+            const consentUpdatedAt = waResult.updatedAt
+              ? new Date(waResult.updatedAt)
+              : undefined;
+            await setMarketingConsent(db, {
+              contactId,
+              status: "OPTED_IN",
+              source: "SHOPIFY_WHATSAPP",
+              at: consentUpdatedAt,
+              evidence: {
+                shop: shopDomain || null,
+                customerGid: waResult.customerGid,
+                state: waResult.state,
+                optInLevel: waResult.optInLevel ?? null,
+                updatedAt: waResult.updatedAt ?? null,
+                collectedFrom: waResult.collectedFrom ?? null,
+                phone: normalizedWaPhone,
+              },
+            });
+            return;
+          } else {
+            console.warn(
+              `[shopify-consent] WhatsApp phone mismatch: customer phone ${maskPhoneLast4(waPhone)} does not match contact phone ${maskPhoneLast4(contactPhone)}. Skipping consent change.`
+            );
+            return;
+          }
+        } else if (waRawState === "UNSUBSCRIBED") {
+          if (isPhoneMatch) {
+            const consentUpdatedAt = waResult.updatedAt
+              ? new Date(waResult.updatedAt)
+              : undefined;
+            await setMarketingConsent(db, {
+              contactId,
+              status: "OPTED_OUT",
+              source: "SHOPIFY_WHATSAPP",
+              at: consentUpdatedAt,
+              evidence: {
+                shop: shopDomain || null,
+                customerGid: waResult.customerGid,
+                state: waResult.state,
+                optInLevel: waResult.optInLevel ?? null,
+                updatedAt: waResult.updatedAt ?? null,
+                collectedFrom: waResult.collectedFrom ?? null,
+                phone: normalizedWaPhone,
+              },
+            });
+            return;
+          } else {
+            console.warn(
+              `[shopify-consent] WhatsApp phone mismatch: customer phone ${maskPhoneLast4(waPhone)} does not match contact phone ${maskPhoneLast4(contactPhone)}. Skipping consent change.`
+            );
+            return;
+          }
+        }
+        // NOT_SUBSCRIBED, PENDING, REDACTED, unknown: fall through to SMS fallback
+      }
+    }
+  }
+
+  // 2. FALLBACK: Run existing SMS consent logic unchanged
   let rawState: string | undefined;
   let smsMarketingPhone: string | undefined;
 

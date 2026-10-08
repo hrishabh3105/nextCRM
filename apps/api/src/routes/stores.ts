@@ -147,7 +147,9 @@ storesRouter.get(
 
 /**
  * PATCH /:id/consent-settings
- * Updates whether to treat Shopify SMS marketing subscription as WhatsApp consent.
+ * Updates whether to treat Shopify SMS marketing subscription as WhatsApp consent (SMS FALLBACK ONLY).
+ * Explicit WhatsApp marketing consent from Shopify's CustomerPhoneNumber.whatsAppMarketingConsent
+ * is used as the primary signal regardless of this setting. This setting controls only the SMS fallback.
  * Enabling requires confirmWording: true and records consentAttestedAt and consentAttestedByUserId.
  */
 storesRouter.patch(

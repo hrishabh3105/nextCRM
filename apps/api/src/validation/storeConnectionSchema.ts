@@ -23,6 +23,7 @@ export const reconnectStoreConnectionSchema = z.object({}).passthrough();
 export type ReconnectStoreConnectionInput = z.infer<typeof reconnectStoreConnectionSchema>;
 
 export const updateStoreConsentSettingsSchema = z.object({
+  // Controls whether Shopify SMS marketing subscription is treated as WhatsApp consent (SMS FALLBACK ONLY; explicit WhatsApp consent takes precedence)
   treatShopifySmsAsWhatsappConsent: z.boolean(),
   confirmWording: z.boolean().optional(),
 });

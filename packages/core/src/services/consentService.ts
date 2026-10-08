@@ -2,6 +2,7 @@ export type ConsentStatus = "OPTED_IN" | "OPTED_OUT" | "UNKNOWN";
 
 export type ConsentSource =
   | "SHOPIFY_SMS"
+  | "SHOPIFY_WHATSAPP"
   | "INBOUND_START"
   | "IMPORT_ATTESTED"
   | "MANUAL"
@@ -80,9 +81,9 @@ export function isStartKeyword(text: string): boolean {
  * - Runs in one transaction: reads current state, computes change, updates contact, inserts ConsentEvent.
  * - Idempotency: Does NOTHING (no update, no event) if status and source are unchanged (webhook retries must not duplicate events).
  * - Enforces precedence: OPTED_OUT is only overridden by an explicit customer or merchant action (INBOUND_START or MANUAL).
- *   Shopify (SHOPIFY_SMS) can NEVER change OPTED_OUT back to OPTED_IN.
+ *   Shopify (SHOPIFY_SMS or SHOPIFY_WHATSAPP) can NEVER change OPTED_OUT back to OPTED_IN.
  * - Never downgrades OPTED_IN to UNKNOWN because Shopify says "not subscribed" (absence of a tick is not a withdrawal).
- *   Shopify state "unsubscribed" DOES move the contact to OPTED_OUT (source SHOPIFY_SMS).
+ *   Shopify state "unsubscribed" DOES move the contact to OPTED_OUT (source SHOPIFY_SMS or SHOPIFY_WHATSAPP).
  */
 export async function setMarketingConsent(
   db: any,
