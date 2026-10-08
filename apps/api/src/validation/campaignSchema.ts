@@ -7,14 +7,17 @@ export const variableMappingEntrySchema = z.discriminatedUnion("source", [
   z.object({
     source: z.literal("contact_field"),
     field: z.enum(["name", "email", "phone"]),
+    fallback: z.string().optional(),
   }),
   z.object({
     source: z.literal("contact_attribute"),
     key: z.string().min(1, "attribute key is required"),
+    fallback: z.string().optional(),
   }),
   z.object({
     source: z.literal("fixed"),
     value: z.string().min(1, "fixed value is required"),
+    fallback: z.string().optional(),
   }),
 ]);
 

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
-import { ApiError, forWorkspace, validateOrThrow } from "@nextcrm/core";
+import { ApiError, forWorkspace, validateOrThrow, setMarketingConsent } from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
   createContactSchema,
@@ -99,12 +99,24 @@ contactsRouter.post(
       req.body
     );
 
-    const contact = await forWorkspace(req.workspaceId!).contact.create({
+    const { consentAttested, ...contactData } = validatedData;
+    const db = forWorkspace(req.workspaceId!);
+
+    let contact = await db.contact.create({
       data: {
-        ...validatedData,
-        optedInAt: new Date(),
+        ...contactData,
+        marketingConsentStatus: "UNKNOWN",
       } as any,
     });
+
+    if (consentAttested) {
+      const consentResult = await setMarketingConsent(db, {
+        contactId: contact.id,
+        status: "OPTED_IN",
+        source: "MANUAL",
+      });
+      contact = consentResult.contact;
+    }
 
     res.status(201).json(contact);
   })
@@ -122,17 +134,29 @@ contactsRouter.patch(
       req.body
     );
 
-    const { optedIn, ...contactData } = validatedData;
+    const { optedIn, consentAttested, ...contactData } = validatedData;
+    const db = forWorkspace(req.workspaceId!);
 
-    const updatePayload: any = { ...contactData };
-    if (typeof optedIn === "boolean") {
-      updatePayload.optedInAt = optedIn ? new Date() : null;
-    }
-
-    const contact = await forWorkspace(req.workspaceId!).contact.update({
+    let contact = await db.contact.update({
       where: { id: req.params.id },
-      data: updatePayload,
+      data: contactData as any,
     });
+
+    if (consentAttested === true || optedIn === true) {
+      const consentResult = await setMarketingConsent(db, {
+        contactId: req.params.id,
+        status: "OPTED_IN",
+        source: "MANUAL",
+      });
+      contact = consentResult.contact;
+    } else if (optedIn === false) {
+      const consentResult = await setMarketingConsent(db, {
+        contactId: req.params.id,
+        status: "OPTED_OUT",
+        source: "MANUAL",
+      });
+      contact = consentResult.contact;
+    }
 
     res.status(200).json(contact);
   })
@@ -157,6 +181,12 @@ contactsRouter.post(
       trim: true,
     });
 
+    const globalAttested =
+      req.body?.consentAttested === true ||
+      req.body?.consentAttested === "true" ||
+      req.query?.consentAttested === "true";
+
+    const db = forWorkspace(req.workspaceId!);
     let imported = 0;
     const skipped: Array<{ row: number; reason: string }> = [];
 
@@ -165,19 +195,26 @@ contactsRouter.post(
       const rowNumber = i + 1;
 
       try {
+        const isRowAttested =
+          globalAttested ||
+          row.consentAttested === "true" ||
+          row.consent_attested === "true" ||
+          row.consentAttested === true;
+
         const rowInput = {
           phone: row.phone,
           name: row.name ? row.name.trim() : undefined,
           email: row.email ? row.email.trim() : undefined,
+          consentAttested: isRowAttested,
         };
 
         const validatedData = validateOrThrow<CreateContactInput>(
           createContactSchema,
           rowInput
         );
-        const { phone: validatedPhone, ...updateData } = validatedData;
+        const { phone: validatedPhone, consentAttested, ...updateData } = validatedData;
 
-        await forWorkspace(req.workspaceId!).contact.upsert({
+        const contact = await db.contact.upsert({
           where: {
             workspaceId_phone: {
               workspaceId: req.workspaceId!,
@@ -185,14 +222,22 @@ contactsRouter.post(
             },
           },
           create: {
-            ...validatedData,
-            optedInAt: new Date(),
+            ...updateData,
+            phone: validatedPhone,
+            marketingConsentStatus: "UNKNOWN",
           } as any,
           update: {
             ...updateData,
-            optedInAt: new Date(),
           },
         });
+
+        if (consentAttested) {
+          await setMarketingConsent(db, {
+            contactId: contact.id,
+            status: "OPTED_IN",
+            source: "IMPORT_ATTESTED",
+          });
+        }
 
         imported++;
       } catch (err: any) {

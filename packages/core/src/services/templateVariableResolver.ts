@@ -3,6 +3,7 @@ export interface VariableMappingEntry {
   field?: "name" | "email" | "phone";
   key?: string;
   value?: string;
+  fallback?: string;
 }
 
 export type VariableMapping = Record<string, VariableMappingEntry>;
@@ -84,9 +85,18 @@ export function resolveTemplateVariables(params: {
       value === undefined ||
       (typeof value === "string" && value.trim() === "")
     ) {
-      return {
-        error: `Missing value for placeholder '{{${placeholder}}}' (source: ${entry.source}) for contact ${contact.phone}`,
-      };
+      if (
+        entry.fallback !== undefined &&
+        entry.fallback !== null &&
+        typeof entry.fallback === "string" &&
+        entry.fallback.trim() !== ""
+      ) {
+        value = entry.fallback;
+      } else {
+        return {
+          error: `Missing value for placeholder '{{${placeholder}}}' (source: ${entry.source}) for contact ${contact.phone}`,
+        };
+      }
     }
 
     resolved.push(String(value));

@@ -11,3 +11,4 @@ export * from "./services/journeyStepProcessor";
 export * from "./services/journeyTrigger";
 export * from "./services/messageRecorder";
 export * from "./services/templateVariableResolver";
+export * from "./services/consentService";

@@ -1,26 +1,69 @@
-import { forWorkspace, startMatchingJourneys } from "@nextcrm/core";
-import { normalizePhoneE164 } from "../utils/phone";
+import { forWorkspace, startMatchingJourneys, setMarketingConsent } from "@nextcrm/core";
+import { normalizePhoneE164, isValidE164 } from "../utils/phone";
+
+/**
+ * Extracts raw phone number candidates from a Shopify order or checkout payload
+ * in order of priority, skipping empty values:
+ *   1. payload.shipping_address?.phone
+ *   2. payload.billing_address?.phone
+ *   3. payload.phone
+ *   4. payload.customer?.phone
+ *   5. payload.customer?.default_address?.phone
+ */
+export function extractPhoneCandidates(payload: any): string[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  const sources = [
+    payload.shipping_address?.phone,
+    payload.billing_address?.phone,
+    payload.phone,
+    payload.customer?.phone,
+    payload.customer?.default_address?.phone,
+  ];
+
+  const candidates: string[] = [];
+  for (const src of sources) {
+    if (src != null) {
+      const str = String(src).trim();
+      if (str.length > 0) {
+        candidates.push(str);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Resolves normalized E.164 phone from payload candidates.
+ * Tries each candidate in order with normalizePhoneE164, returning the first that normalizes to a valid phone.
+ */
+export function resolveNormalizedPhone(payload: any): string | null {
+  const candidates = extractPhoneCandidates(payload);
+  for (const candidate of candidates) {
+    const normalized = normalizePhoneE164(candidate);
+    if (normalized && isValidE164(normalized)) {
+      return normalized;
+    }
+  }
+  return null;
+}
 
 /**
  * Resolves an existing contact by normalized phone or creates a new one.
  * Follows the same find-or-create pattern as inboundMessageHandler.ts.
+ * Note: New contacts default to UNKNOWN consent status (no automatic opt-in).
  */
 async function resolveOrCreateContact(
   db: any,
   payload: any
-): Promise<string | null> {
-  const rawPhone =
-    payload.customer?.phone ||
-    payload.phone ||
-    payload.billing_address?.phone ||
-    payload.shipping_address?.phone ||
-    null;
+): Promise<any | null> {
+  // Details typed for this purchase must beat saved account details, which can
+  // be stale (a real test order carried a typed number and an older saved number).
+  const normalizedPhone = resolveNormalizedPhone(payload);
 
-  if (!rawPhone) {
-    return null;
-  }
-
-  const normalizedPhone = normalizePhoneE164(String(rawPhone));
   if (!normalizedPhone) {
     return null;
   }
@@ -35,23 +78,12 @@ async function resolveOrCreateContact(
     const fullName = `${firstName} ${lastName}`.trim() || payload.customer?.name || null;
     const email = payload.customer?.email || payload.email || null;
 
-    /**
-     * Note on Contact creation and optedInAt:
-     * This is a real customer interacting with the merchant's Shopify store (placing an order
-     * or initiating a checkout). This provides legitimate business context for storing the contact.
-     * We set optedInAt on create to indicate when the contact record was established.
-     *
-     * CRITICAL DISTINCTION: This does NOT imply WhatsApp opt-in consent specifically, just that
-     * we have a legitimate business reason to store the contact. Do not conflate "we know about
-     * this customer" with "they consented to outbound WhatsApp marketing messages".
-     */
     try {
       contact = await db.contact.create({
         data: {
           phone: normalizedPhone,
           name: fullName,
           email,
-          optedInAt: new Date(),
         } as any,
       });
     } catch (err: any) {
@@ -70,7 +102,170 @@ async function resolveOrCreateContact(
     }
   }
 
-  return contact?.id ?? null;
+  return contact ?? null;
+}
+
+export interface ProcessShopifyConsentParams {
+  db: any;
+  contactId: string;
+  contactPhone: string;
+  payload: any;
+  isCheckout?: boolean;
+  storeConnection?: {
+    treatShopifySmsAsWhatsappConsent?: boolean;
+    shopDomain?: string;
+  } | null;
+  workspaceId?: string;
+}
+
+/**
+ * Processes Shopify SMS marketing consent fields for orders and checkouts.
+ * - Extracts SMS consent fields only (NOT email fields like accepts_marketing or buyer_accepts_marketing).
+ * - Orders: customer.sms_marketing_consent.state ("subscribed", "not_subscribed", "pending", "unsubscribed", "redacted").
+ * - Checkouts: buyer_accepts_sms_marketing === true (and sms_marketing_phone). Also uses customer.sms_marketing_consent if present.
+ * - If phone mismatch between consent phone and contact phone: records evidence only, does NOT grant consent, logs warning.
+ * - If state is "unsubscribed": moves contact to OPTED_OUT regardless of store setting.
+ * - If state is "subscribed": if treatShopifySmsAsWhatsappConsent is true, sets OPTED_IN. If false, records raw state in evidence without granting opt-in.
+ * - Absence of a tick ("not_subscribed", "pending", etc.) never downgrades OPTED_IN.
+ */
+export async function processShopifyConsent(
+  params: ProcessShopifyConsentParams
+): Promise<void> {
+  const { db, contactId, contactPhone, payload, isCheckout, workspaceId } = params;
+
+  let storeConnection = params.storeConnection;
+  if (!storeConnection && workspaceId) {
+    storeConnection = await db.storeConnection.findFirst({
+      where: { workspaceId },
+    });
+  }
+
+  const shopDomain = storeConnection?.shopDomain;
+  const treatAsConsent = storeConnection?.treatShopifySmsAsWhatsappConsent ?? true;
+
+  let rawState: string | undefined;
+  let smsMarketingPhone: string | undefined;
+
+  const smsConsent = payload?.customer?.sms_marketing_consent;
+
+  if (isCheckout) {
+    if (smsConsent?.state) {
+      rawState = smsConsent.state;
+    } else if (payload?.buyer_accepts_sms_marketing === true) {
+      rawState = "subscribed";
+    } else if (payload?.buyer_accepts_sms_marketing === false) {
+      rawState = "not_subscribed";
+    }
+
+    smsMarketingPhone =
+      payload?.sms_marketing_phone ||
+      payload?.customer?.sms_marketing_phone ||
+      smsConsent?.phone;
+  } else {
+    rawState = smsConsent?.state;
+    smsMarketingPhone = payload?.customer?.sms_marketing_phone || smsConsent?.phone;
+  }
+
+  if (!rawState) {
+    return;
+  }
+
+  const state = String(rawState).toLowerCase().trim();
+  const optInLevel = smsConsent?.opt_in_level;
+  const consentUpdatedAt = smsConsent?.consent_updated_at
+    ? new Date(smsConsent.consent_updated_at)
+    : undefined;
+  const collectedFrom = smsConsent?.consent_collected_from;
+
+  const evidence = {
+    state,
+    optInLevel,
+    consentUpdatedAt: consentUpdatedAt?.toISOString(),
+    collectedFrom,
+    smsMarketingPhone: smsMarketingPhone || null,
+    shop: shopDomain || null,
+  };
+
+  // Phone match safety: if a consent phone is known and differs from contact phone after normalization,
+  // do NOT grant consent; record evidence only and log a warning.
+  if (smsMarketingPhone) {
+    const normalizedConsentPhone = normalizePhoneE164(String(smsMarketingPhone));
+    if (normalizedConsentPhone && normalizedConsentPhone !== contactPhone) {
+      console.warn(
+        `[shopify-consent] Phone mismatch: consent phone ${normalizedConsentPhone} does not match contact phone ${contactPhone}. Skipping consent change.`
+      );
+      const currentContact = await db.contact.findUnique({
+        where: { id: contactId },
+      });
+      if (currentContact) {
+        await db.consentEvent.create({
+          data: {
+            workspaceId: currentContact.workspaceId,
+            contactId,
+            status: currentContact.marketingConsentStatus || "UNKNOWN",
+            previousStatus: currentContact.marketingConsentStatus || null,
+            source: "SHOPIFY_SMS",
+            evidence: {
+              ...evidence,
+              phoneMismatch: true,
+              consentPhone: normalizedConsentPhone,
+              contactPhone,
+            },
+          },
+        });
+      }
+      return;
+    }
+  }
+
+  // "unsubscribed" -> OPTED_OUT regardless of the setting
+  if (state === "unsubscribed") {
+    await setMarketingConsent(db, {
+      contactId,
+      status: "OPTED_OUT",
+      source: "SHOPIFY_SMS",
+      at: consentUpdatedAt,
+      evidence,
+    });
+    return;
+  }
+
+  // "subscribed"
+  if (state === "subscribed") {
+    if (treatAsConsent) {
+      await setMarketingConsent(db, {
+        contactId,
+        status: "OPTED_IN",
+        source: "SHOPIFY_SMS",
+        at: consentUpdatedAt,
+        evidence,
+      });
+    } else {
+      // If the setting is FALSE: never grant OPTED_IN from Shopify.
+      // Store the raw Shopify state in the ConsentEvent evidence only when we would otherwise have changed something; do not spam events.
+      const currentContact = await db.contact.findUnique({
+        where: { id: contactId },
+      });
+      if (currentContact && currentContact.marketingConsentStatus !== "OPTED_IN") {
+        await db.consentEvent.create({
+          data: {
+            workspaceId: currentContact.workspaceId,
+            contactId,
+            status: currentContact.marketingConsentStatus || "UNKNOWN",
+            previousStatus: currentContact.marketingConsentStatus || null,
+            source: "SHOPIFY_SMS",
+            evidence: {
+              ...evidence,
+              ignoredDueToSetting: true,
+            },
+          },
+        });
+      }
+    }
+    return;
+  }
+
+  // Other states ("not_subscribed", "pending", "redacted"): do nothing, never downgrade OPTED_IN
 }
 
 /**
@@ -78,7 +273,11 @@ async function resolveOrCreateContact(
  */
 export async function handleShopifyOrder(
   payload: any,
-  workspaceId: string
+  workspaceId: string,
+  storeConnection?: {
+    treatShopifySmsAsWhatsappConsent?: boolean;
+    shopDomain?: string;
+  } | null
 ): Promise<void> {
   if (!payload || !payload.id) {
     console.warn(`[shopify-webhook] Received order payload without id, skipping`);
@@ -91,7 +290,20 @@ export async function handleShopifyOrder(
   const status = payload.financial_status ?? "unknown";
 
   const db = forWorkspace(workspaceId);
-  const contactId = await resolveOrCreateContact(db, payload);
+  const contact = await resolveOrCreateContact(db, payload);
+  const contactId = contact?.id ?? null;
+
+  if (contact) {
+    await processShopifyConsent({
+      db,
+      contactId: contact.id,
+      contactPhone: contact.phone,
+      payload,
+      isCheckout: false,
+      storeConnection,
+      workspaceId,
+    });
+  }
 
   try {
     await db.order.upsert({
@@ -159,7 +371,11 @@ export async function handleShopifyOrder(
 export async function handleShopifyCheckout(
   payload: any,
   workspaceId: string,
-  status: "active" | "abandoned"
+  status: "active" | "abandoned",
+  storeConnection?: {
+    treatShopifySmsAsWhatsappConsent?: boolean;
+    shopDomain?: string;
+  } | null
 ): Promise<void> {
   if (!payload || !payload.token) {
     console.warn(`[shopify-webhook] Received checkout payload without token, skipping`);
@@ -171,7 +387,20 @@ export async function handleShopifyCheckout(
   const lastActivityAt = new Date();
 
   const db = forWorkspace(workspaceId);
-  const contactId = await resolveOrCreateContact(db, payload);
+  const contact = await resolveOrCreateContact(db, payload);
+  const contactId = contact?.id ?? null;
+
+  if (contact) {
+    await processShopifyConsent({
+      db,
+      contactId: contact.id,
+      contactPhone: contact.phone,
+      payload,
+      isCheckout: true,
+      storeConnection,
+      workspaceId,
+    });
+  }
 
   let cart: any = null;
   try {
@@ -237,7 +466,11 @@ export async function handleShopifyCheckout(
  */
 export async function handleShopifyOrderUpdate(
   payload: any,
-  workspaceId: string
+  workspaceId: string,
+  storeConnection?: {
+    treatShopifySmsAsWhatsappConsent?: boolean;
+    shopDomain?: string;
+  } | null
 ): Promise<void> {
   if (!payload || !payload.id) {
     console.warn(`[shopify-webhook] Received order update payload without id, skipping`);
@@ -246,7 +479,20 @@ export async function handleShopifyOrderUpdate(
 
   const shopifyOrderId = String(payload.id);
   const db = forWorkspace(workspaceId);
-  const contactId = await resolveOrCreateContact(db, payload);
+  const contact = await resolveOrCreateContact(db, payload);
+  const contactId = contact?.id ?? null;
+
+  if (contact) {
+    await processShopifyConsent({
+      db,
+      contactId: contact.id,
+      contactPhone: contact.phone,
+      payload,
+      isCheckout: false,
+      storeConnection,
+      workspaceId,
+    });
+  }
 
   const existing = await db.order.findFirst({
     where: { shopifyOrderId },
@@ -335,4 +581,3 @@ export async function handleShopifyOrderUpdate(
     }
   }
 }
-

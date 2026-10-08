@@ -5,6 +5,7 @@ import {
   SEND_MESSAGE_QUEUE,
   redisConnection,
   forWorkspace,
+  evaluateSendPermission,
 } from "@nextcrm/core";
 
 export interface CampaignDispatchJobData {
@@ -41,6 +42,7 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
     // 1. Fetch Campaign
     const campaign = await db.campaign.findUnique({
       where: { id: campaignId },
+      include: { template: true },
     });
 
     if (!campaign) {
@@ -58,7 +60,7 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
     // 2. Fetch contacts matching campaign segmentation
     // Backward-compatibility guarantee:
     // Every campaign created before this feature has segment: null, which
-    // must resolve identically to { type: "all" } (all opted-in contacts).
+    // resolves identically to { type: "all" }.
     const segment = campaign.segment as
       | { type: "all" }
       | { type: "contact_ids"; contactIds: string[] }
@@ -72,27 +74,17 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
         }
       | null;
 
-    let contactWhere: any = {
-      optedInAt: {
-        not: null,
-      },
-    };
+    let contactWhere: any = {};
 
     if (segment && typeof segment === "object" && "type" in segment) {
-      if (segment.type === "contact_ids") {
+      if (segment.type === "contact_ids" && Array.isArray(segment.contactIds)) {
         contactWhere = {
           id: {
             in: segment.contactIds,
           },
-          optedInAt: {
-            not: null,
-          },
         };
-      } else if (segment.type === "filter") {
+      } else if (segment.type === "filter" && Array.isArray(segment.conditions)) {
         contactWhere = {
-          optedInAt: {
-            not: null,
-          },
           AND: segment.conditions.map((c) => ({
             attributes: {
               path: [c.key],
@@ -103,14 +95,38 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
       }
     }
 
-    const contacts = await db.contact.findMany({
+    const matchingContacts = await db.contact.findMany({
       where: contactWhere,
     });
 
-    // If no opted-in contacts found, mark completed immediately
-    if (contacts.length === 0) {
+    const eligibleContacts: typeof matchingContacts = [];
+    let skippedNoConsent = 0;
+    let skippedOptedOut = 0;
+
+    for (const contact of matchingContacts) {
+      const permission = evaluateSendPermission({
+        contact,
+        template: campaign.template,
+        context: "campaign",
+      });
+
+      if (permission.allowed) {
+        eligibleContacts.push(contact);
+      } else if (permission.reason === "OPTED_OUT") {
+        skippedOptedOut++;
+      } else {
+        skippedNoConsent++;
+      }
+    }
+
+    console.log(
+      `[campaign-dispatch] Campaign ${campaignId} audience resolution: ${eligibleContacts.length} eligible, ${skippedNoConsent} skipped (no consent), ${skippedOptedOut} skipped (opted out), total matching: ${matchingContacts.length}`
+    );
+
+    // If no eligible contacts found, mark completed immediately
+    if (eligibleContacts.length === 0) {
       console.log(
-        `[campaign-dispatch] Campaign ${campaignId} has 0 opted-in contacts. Marking as completed.`
+        `[campaign-dispatch] Campaign ${campaignId} has 0 eligible contacts. Marking as completed.`
       );
       await db.campaign.update({
         where: { id: campaign.id },
@@ -124,7 +140,7 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
 
     // 3. Create CampaignRecipient rows with status "pending", skipping duplicates on retry
     await db.campaignRecipient.createMany({
-      data: contacts.map((contact) => ({
+      data: eligibleContacts.map((contact) => ({
         campaignId: campaign.id,
         contactId: contact.id,
         status: "pending",
@@ -136,7 +152,7 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
     await db.campaign.update({
       where: { id: campaign.id },
       data: {
-        totalRecipients: contacts.length,
+        totalRecipients: eligibleContacts.length,
         status: "sending",
       },
     });
@@ -146,7 +162,7 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
       where: {
         campaignId: campaign.id,
         contactId: {
-          in: contacts.map((c) => c.id),
+          in: eligibleContacts.map((c) => c.id),
         },
       },
     });
@@ -156,8 +172,8 @@ export const campaignDispatchWorker = new Worker<CampaignDispatchJobData>(
       recipientMap.set(r.contactId, r.id);
     }
 
-    // 6. Enqueue one "send-message" job PER contact
-    const jobs = contacts
+    // 6. Enqueue one "send-message" job PER eligible contact
+    const jobs = eligibleContacts
       .map((contact) => {
         const campaignRecipientId = recipientMap.get(contact.id);
         if (!campaignRecipientId) {

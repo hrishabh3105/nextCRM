@@ -330,7 +330,9 @@ templatesRouter.post(
         contact = await db.contact.create({
           data: {
             phone: normalizedPhone,
-            optedInAt: new Date(),
+            marketingConsentStatus: "OPTED_IN",
+            marketingConsentSource: "MANUAL",
+            marketingConsentAt: new Date(),
           } as any,
         });
       } catch (err: any) {

@@ -10,6 +10,7 @@ import {
   checkFrequencyCap,
   recordOutboundMessage,
   resolveTemplateVariables,
+  evaluateSendPermission,
 } from "@nextcrm/core";
 import { SendMessageJobData } from "./campaignDispatchWorker";
 
@@ -153,6 +154,34 @@ export const sendMessageWorker = new Worker<SendMessageJobData>(
 
     if (!contact) {
       await recordFailure(`Contact ${contactId} not found`);
+      return;
+    }
+
+    // Consent guard: ensure contact still has consent at actual send time
+    const permission = evaluateSendPermission({
+      contact,
+      template: campaign.template,
+      context: "campaign",
+    });
+
+    if (!permission.allowed) {
+      const skipStatus =
+        permission.reason === "OPTED_OUT" ? "skipped_opted_out" : "skipped_no_consent";
+      console.log(
+        `[send-message] Contact ${contact.id} (recipient ${campaignRecipientId}) blocked by consent guard (${permission.reason}). Skipping message send.`
+      );
+
+      await db.campaignRecipient.update({
+        where: { id: campaignRecipientId },
+        data: { status: skipStatus },
+      });
+
+      const updated = await db.campaign.update({
+        where: { id: campaignId },
+        data: { skippedCount: { increment: 1 } },
+      });
+
+      await checkCampaignCompletion(updated);
       return;
     }
 

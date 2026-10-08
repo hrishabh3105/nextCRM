@@ -1,26 +1,30 @@
 import { z } from "zod";
+import { isValidShopDomain } from "@nextcrm/core";
 
 /**
  * Validation schema for connecting a Shopify store.
- *
- * Note: Shopify's custom-app tokens (Admin API access tokens) are tied directly to
- * the store's primary *.myshopify.com domain, rather than any branded custom domains
- * (e.g. store.com). Therefore, we strictly require the *.myshopify.com format.
+ * Only requires shopDomain; extra fields are ignored.
+ * Validates domain using isValidShopDomain.
  */
 export const createStoreConnectionSchema = z.object({
   shopDomain: z
     .string()
-    .min(1)
-    .regex(/^[a-z0-9-]+\.myshopify\.com$/, "must be a valid myshopify.com domain"),
-  accessToken: z.string().min(1),
-  apiSecretKey: z.string().min(1),
+    .min(1, "shopDomain is required")
+    .refine(isValidShopDomain, "must be a valid myshopify.com domain"),
 });
 
 export type CreateStoreConnectionInput = z.infer<typeof createStoreConnectionSchema>;
 
-export const reconnectStoreConnectionSchema = z.object({
-  accessToken: z.string().min(1).optional(),
-  apiSecretKey: z.string().min(1).optional(),
-});
+/**
+ * No body is required for reconnecting a store connection.
+ */
+export const reconnectStoreConnectionSchema = z.object({}).passthrough();
 
 export type ReconnectStoreConnectionInput = z.infer<typeof reconnectStoreConnectionSchema>;
+
+export const updateStoreConsentSettingsSchema = z.object({
+  treatShopifySmsAsWhatsappConsent: z.boolean(),
+  confirmWording: z.boolean().optional(),
+});
+
+export type UpdateStoreConsentSettingsInput = z.infer<typeof updateStoreConsentSettingsSchema>;

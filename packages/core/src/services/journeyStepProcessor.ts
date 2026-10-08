@@ -5,6 +5,7 @@ import { recordMessageCost } from "./costTracker";
 import { checkFrequencyCap, recordOutboundMessage } from "./messageRecorder";
 import { resolveTemplateVariables, VariableMapping } from "./templateVariableResolver";
 import { journeyTickQueue } from "../queue";
+import { evaluateSendPermission, SendContext } from "./consentService";
 
 export interface JourneyStep {
   type: "wait" | "send_message" | "condition" | "exit" | string;
@@ -83,6 +84,7 @@ export async function processJourneyStep(
   // 1. Fetch the run to inspect current step index and status
   const run = await db.journeyRun.findFirst({
     where: { id: runId },
+    include: { journey: true },
   });
 
   if (!run) {
@@ -228,6 +230,33 @@ export async function processJourneyStep(
         return;
       }
 
+      // Consent evaluation: MARKETING requires consent (exempt for cart_abandoned unless OPTED_OUT)
+      const sendContext: SendContext =
+        run.journey?.triggerEvent === "cart_abandoned"
+          ? "journey_abandoned_cart"
+          : "journey";
+
+      const permission = evaluateSendPermission({
+        contact,
+        template,
+        context: sendContext,
+      });
+
+      if (!permission.allowed) {
+        console.log(
+          `[journey-step-processor] Contact ${contact.id} blocked by consent guard (${permission.reason}) in run ${runId}. Skipping send_message step.`
+        );
+        await db.journeyRun.update({
+          where: { id: runId },
+          data: {
+            currentStepIndex: run.currentStepIndex + 1,
+            status: "running",
+            nextStepAt: null,
+          },
+        });
+        return processJourneyStep(runId, workspaceId, depth + 1);
+      }
+
       const canSend = await checkFrequencyCap(db, contact.id);
       if (!canSend) {
         console.log(
@@ -268,7 +297,7 @@ export async function processJourneyStep(
 
         if ("error" in resolvedResult) {
           console.warn(
-            `[journey-step-processor] Variable resolution failed for contact ${contact.id} in run ${runId}: ${resolvedResult.error}. Advancing to next step.`
+            `[journey-step-processor] Variable resolution failed for contact ${contact.id} in run ${runId}: ${resolvedResult.error} (reason: VARIABLE_RESOLUTION_FAILED). Advancing to next step.`
           );
           await db.journeyRun.update({
             where: { id: runId },

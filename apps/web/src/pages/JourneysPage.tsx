@@ -4,6 +4,8 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   FriendlyStep,
   flattenToEngineSteps,
+  reconcileVariableMapping,
+  VariableMappingEntry,
 } from "../lib/journeyStepBuilder";
 import {
   GitBranch,
@@ -47,6 +49,9 @@ export interface Template {
   category: string;
   language: string;
   channelId: string;
+  bodyPreview?: string;
+  placeholders?: string[];
+  positionalPlaceholders?: string[];
 }
 
 export interface Channel {
@@ -93,10 +98,51 @@ function getStepCount(journey: Journey): number {
   return Array.isArray(targetVersion?.steps) ? targetVersion.steps.length : 0;
 }
 
+function getTemplatePlaceholders(template?: Template): string[] {
+  if (!template) return [];
+  const list =
+    Array.isArray(template.positionalPlaceholders) && template.positionalPlaceholders.length > 0
+      ? template.positionalPlaceholders
+      : Array.isArray(template.placeholders)
+      ? template.placeholders
+      : [];
+  return Array.from(new Set(list));
+}
+
+function journeyNeedsVariableMapping(journey: Journey, templates: Template[]): boolean {
+  if (!journey.versions || journey.versions.length === 0) return false;
+  const targetVersion = journey.currentVersionId
+    ? journey.versions.find((v) => v.id === journey.currentVersionId) || journey.versions[0]
+    : journey.versions[0];
+  if (!targetVersion || !Array.isArray(targetVersion.steps)) return false;
+
+  for (const step of targetVersion.steps) {
+    if (step?.type === "send_message" || step?.kind === "send_message") {
+      const tpl = templates.find((t) => t.id === step.templateId);
+      if (!tpl) continue;
+      const placeholders = getTemplatePlaceholders(tpl);
+      if (placeholders.length === 0) continue;
+      const mapping = step.variableMapping || {};
+      for (const p of placeholders) {
+        const entry = mapping[p];
+        if (!entry) return true;
+        if (entry.source === "contact_field" && !entry.field) return true;
+        if (entry.source === "contact_attribute" && !entry.key?.trim()) return true;
+        if (
+          entry.source === "fixed" &&
+          (entry.value === undefined || entry.value === null || entry.value.trim() === "")
+        )
+          return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Validates a tree of FriendlyStep objects before submission.
  */
-function validateFriendlySteps(steps: FriendlyStep[]): string | null {
+function validateFriendlySteps(steps: FriendlyStep[], templates?: Template[]): string | null {
   if (steps.length === 0) {
     return "Journey must have at least one step.";
   }
@@ -114,17 +160,42 @@ function validateFriendlySteps(steps: FriendlyStep[]): string | null {
       if (!step.channelId) {
         return `Step ${i + 1} (Send a message) requires a connected channel to be selected.`;
       }
+      if (templates) {
+        const tpl = templates.find((t) => t.id === step.templateId);
+        if (tpl) {
+          const placeholders = getTemplatePlaceholders(tpl);
+          const mapping = step.variableMapping || {};
+          for (const p of placeholders) {
+            const entry = mapping[p];
+            if (!entry) {
+              return `Step ${i + 1} (Send a message) is missing variable mapping for placeholder '{{${p}}}'.`;
+            }
+            if (entry.source === "contact_field" && !entry.field) {
+              return `Step ${i + 1}: Select a contact field for placeholder '{{${p}}}'.`;
+            }
+            if (entry.source === "contact_attribute" && !entry.key?.trim()) {
+              return `Step ${i + 1}: Provide an attribute key for placeholder '{{${p}}}'.`;
+            }
+            if (
+              entry.source === "fixed" &&
+              (entry.value === undefined || entry.value === null || entry.value.trim() === "")
+            ) {
+              return `Step ${i + 1}: Provide a fixed value for placeholder '{{${p}}}'.`;
+            }
+          }
+        }
+      }
     } else if (
       step.kind === "check_order_placed" ||
       step.kind === "check_customer_replied_confirm" ||
       step.kind === "check_customer_replied_decline"
     ) {
       if (step.ifYes.length > 0) {
-        const err = validateFriendlySteps(step.ifYes);
+        const err = validateFriendlySteps(step.ifYes, templates);
         if (err) return `In Step ${i + 1} (If Yes branch): ${err}`;
       }
       if (step.ifNo.length > 0) {
-        const err = validateFriendlySteps(step.ifNo);
+        const err = validateFriendlySteps(step.ifNo, templates);
         if (err) return `In Step ${i + 1} (If No branch): ${err}`;
       }
     }
@@ -170,10 +241,14 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
     if (addingKind === "wait") {
       newStep = { kind: "wait", amount: depth === 0 ? 2 : 1, unit: "hours" };
     } else if (addingKind === "send_message") {
+      const defaultTemplate = templates[0];
+      const defaultPlaceholders = getTemplatePlaceholders(defaultTemplate);
+      const initialMapping = reconcileVariableMapping({}, defaultPlaceholders);
       newStep = {
         kind: "send_message",
-        templateId: templates[0]?.id || "",
+        templateId: defaultTemplate?.id || "",
         channelId: channels[0]?.id || "",
+        variableMapping: initialMapping,
       };
     } else if (
       addingKind === "check_order_placed" ||
@@ -207,7 +282,7 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
           >
             {/* Step Header */}
             <div className="flex items-center justify-between gap-2 mb-2 pb-1.5 border-b border-crm-border/60">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="w-5 h-5 rounded-full bg-crm-accentSubtle text-crm-accent text-[11px] font-mono font-bold flex items-center justify-center">
                   {index + 1}
                 </span>
@@ -218,6 +293,31 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                   {step.kind === "check_customer_replied_confirm" && "Check If Customer Replied YES"}
                   {step.kind === "check_customer_replied_decline" && "Check If Customer Replied NO"}
                 </span>
+                {step.kind === "send_message" && (() => {
+                  const tpl = templates.find((t) => t.id === step.templateId);
+                  if (!tpl) return null;
+                  const placeholders = getTemplatePlaceholders(tpl);
+                  if (placeholders.length === 0) return null;
+                  const mapping = step.variableMapping || {};
+                  const isMissing = placeholders.some((p) => {
+                    const entry = mapping[p];
+                    if (!entry) return true;
+                    if (entry.source === "contact_field" && !entry.field) return true;
+                    if (entry.source === "contact_attribute" && !entry.key?.trim()) return true;
+                    if (
+                      entry.source === "fixed" &&
+                      (entry.value === undefined || entry.value === null || entry.value.trim() === "")
+                    )
+                      return true;
+                    return false;
+                  });
+                  return isMissing ? (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-800 border border-amber-300">
+                      <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                      Needs variable mapping
+                    </span>
+                  ) : null;
+                })()}
               </div>
               <button
                 type="button"
@@ -279,68 +379,315 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
               </div>
             )}
 
-            {step.kind === "send_message" && (
-              <div className="space-y-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] font-medium text-crm-textSecondary mb-1">
-                      Approved WhatsApp Template
-                    </label>
-                    {templates.length === 0 ? (
-                      <p className="text-[11px] text-red-600 italic">
-                        No approved templates found.
-                      </p>
-                    ) : (
-                      <select
-                        value={step.templateId}
-                        onChange={(e) =>
-                          updateStep(index, {
-                            ...step,
-                            templateId: e.target.value,
-                          })
-                        }
-                        className="w-full px-2.5 py-1.5 text-xs bg-crm-surface border border-crm-border rounded focus:outline-none focus:border-crm-accent"
-                      >
-                        <option value="">Select a template...</option>
-                        {templates.map((tpl) => (
-                          <option key={tpl.id} value={tpl.id}>
-                            {tpl.providerName} ({tpl.language.toUpperCase()})
-                          </option>
-                        ))}
-                      </select>
-                    )}
+            {step.kind === "send_message" && (() => {
+              const selectedTemplate = templates.find((tpl) => tpl.id === step.templateId);
+              const placeholders = getTemplatePlaceholders(selectedTemplate);
+              const mapping = step.variableMapping || {};
+
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-medium text-crm-textSecondary mb-1">
+                        Approved WhatsApp Template
+                      </label>
+                      {templates.length === 0 ? (
+                        <p className="text-[11px] text-red-600 italic">
+                          No approved templates found.
+                        </p>
+                      ) : (
+                        <select
+                          value={step.templateId}
+                          onChange={(e) => {
+                            const nextTemplateId = e.target.value;
+                            const nextTemplate = templates.find((t) => t.id === nextTemplateId);
+                            const nextPlaceholders = getTemplatePlaceholders(nextTemplate);
+                            const updatedMapping = reconcileVariableMapping(step.variableMapping, nextPlaceholders);
+                            updateStep(index, {
+                              ...step,
+                              templateId: nextTemplateId,
+                              variableMapping: updatedMapping,
+                            });
+                          }}
+                          className="w-full px-2.5 py-1.5 text-xs bg-crm-surface border border-crm-border rounded focus:outline-none focus:border-crm-accent"
+                        >
+                          <option value="">Select a template...</option>
+                          {templates.map((tpl) => (
+                            <option key={tpl.id} value={tpl.id}>
+                              {tpl.providerName} ({tpl.language.toUpperCase()})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-crm-textSecondary mb-1">
+                        Connected WhatsApp Channel
+                      </label>
+                      {channels.length === 0 ? (
+                        <p className="text-[11px] text-red-600 italic">
+                          No connected channels found.
+                        </p>
+                      ) : (
+                        <select
+                          value={step.channelId}
+                          onChange={(e) =>
+                            updateStep(index, {
+                              ...step,
+                              channelId: e.target.value,
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 text-xs bg-crm-surface border border-crm-border rounded focus:outline-none focus:border-crm-accent"
+                        >
+                          <option value="">Select a channel...</option>
+                          {channels.map((chn) => (
+                            <option key={chn.id} value={chn.id}>
+                              {chn.phoneNumber || chn.id} ({chn.provider})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-[11px] font-medium text-crm-textSecondary mb-1">
-                      Connected WhatsApp Channel
-                    </label>
-                    {channels.length === 0 ? (
-                      <p className="text-[11px] text-red-600 italic">
-                        No connected channels found.
-                      </p>
-                    ) : (
-                      <select
-                        value={step.channelId}
-                        onChange={(e) =>
-                          updateStep(index, {
-                            ...step,
-                            channelId: e.target.value,
-                          })
-                        }
-                        className="w-full px-2.5 py-1.5 text-xs bg-crm-surface border border-crm-border rounded focus:outline-none focus:border-crm-accent"
-                      >
-                        <option value="">Select a channel...</option>
-                        {channels.map((chn) => (
-                          <option key={chn.id} value={chn.id}>
-                            {chn.phoneNumber || chn.id} ({chn.provider})
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
+
+                  {/* Template Variable Mapping Section */}
+                  {selectedTemplate && (
+                    <div className="pt-2 border-t border-crm-border/60 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-crm-textSecondary flex items-center gap-1.5">
+                          <span>Template Variable Mapping</span>
+                          {placeholders.length > 0 && (
+                            <span className="font-mono text-[10px] bg-crm-subtle px-1.5 py-0.5 rounded border border-crm-border">
+                              {placeholders.length}
+                            </span>
+                          )}
+                        </span>
+                        {placeholders.length === 0 && (
+                          <span className="text-[11px] text-crm-textMuted italic">
+                            This template has no placeholders.
+                          </span>
+                        )}
+                      </div>
+
+                      {placeholders.length > 0 && (
+                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                          {placeholders.map((placeholder) => {
+                            const entry: VariableMappingEntry = mapping[placeholder] || {
+                              source: "contact_field",
+                              field: "name",
+                            };
+
+                            let inlineError: string | null = null;
+                            if (!mapping[placeholder]) {
+                              inlineError = "Variable is unmapped";
+                            } else if (entry.source === "contact_field" && !entry.field) {
+                              inlineError = "Select a contact field";
+                            } else if (entry.source === "contact_attribute" && !entry.key?.trim()) {
+                              inlineError = "Enter an attribute key";
+                            } else if (
+                              entry.source === "fixed" &&
+                              (entry.value === undefined || entry.value === null || entry.value.trim() === "")
+                            ) {
+                              inlineError = "Enter a fixed value";
+                            }
+
+                            return (
+                              <div
+                                key={placeholder}
+                                className={`p-2.5 bg-white border rounded-lg space-y-2 ${
+                                  inlineError ? "border-amber-300 bg-amber-50/20" : "border-crm-border"
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-crm-accentSubtle text-crm-accent border border-crm-accentBorder">
+                                      {"{{"}{placeholder}{"}}"}
+                                    </span>
+                                    {inlineError && (
+                                      <span className="text-[10px] text-amber-700 font-medium flex items-center gap-1">
+                                        <AlertCircle className="w-3 h-3 text-amber-600" />
+                                        {inlineError}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Source Toggle */}
+                                  <div className="inline-flex p-0.5 rounded-md bg-crm-subtle border border-crm-border text-xs">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const newMapping = {
+                                          ...mapping,
+                                          [placeholder]: {
+                                            source: "contact_field" as const,
+                                            field: entry.field || "name",
+                                            fallback: entry.fallback || "",
+                                          },
+                                        };
+                                        updateStep(index, { ...step, variableMapping: newMapping });
+                                      }}
+                                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                                        entry.source === "contact_field"
+                                          ? "bg-crm-accent text-white shadow-xs font-semibold"
+                                          : "text-crm-textSecondary hover:text-crm-text"
+                                      }`}
+                                    >
+                                      Contact Field
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const newMapping = {
+                                          ...mapping,
+                                          [placeholder]: {
+                                            source: "contact_attribute" as const,
+                                            key: entry.key || "",
+                                            fallback: entry.fallback || "",
+                                          },
+                                        };
+                                        updateStep(index, { ...step, variableMapping: newMapping });
+                                      }}
+                                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                                        entry.source === "contact_attribute"
+                                          ? "bg-crm-accent text-white shadow-xs font-semibold"
+                                          : "text-crm-textSecondary hover:text-crm-text"
+                                      }`}
+                                    >
+                                      Custom Attribute
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const newMapping = {
+                                          ...mapping,
+                                          [placeholder]: {
+                                            source: "fixed" as const,
+                                            value: entry.value || "",
+                                          },
+                                        };
+                                        updateStep(index, { ...step, variableMapping: newMapping });
+                                      }}
+                                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                                        entry.source === "fixed"
+                                          ? "bg-crm-accent text-white shadow-xs font-semibold"
+                                          : "text-crm-textSecondary hover:text-crm-text"
+                                      }`}
+                                    >
+                                      Fixed Text
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Inputs */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {entry.source === "contact_field" && (
+                                    <div>
+                                      <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
+                                        Field
+                                      </label>
+                                      <select
+                                        value={entry.field || "name"}
+                                        onChange={(e) => {
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              ...entry,
+                                              field: e.target.value as "name" | "email" | "phone",
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        }}
+                                        className="w-full px-2 py-1 bg-white border border-crm-border rounded text-xs font-mono text-crm-text focus:outline-none focus:border-crm-accent"
+                                      >
+                                        <option value="name">Contact Name (name)</option>
+                                        <option value="phone">Phone Number (phone)</option>
+                                        <option value="email">Email Address (email)</option>
+                                      </select>
+                                    </div>
+                                  )}
+
+                                  {entry.source === "contact_attribute" && (
+                                    <div>
+                                      <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
+                                        Attribute Key
+                                      </label>
+                                      <input
+                                        type="text"
+                                        placeholder="e.g. city, vip_tier..."
+                                        value={entry.key || ""}
+                                        onChange={(e) => {
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              ...entry,
+                                              key: e.target.value,
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        }}
+                                        className="w-full px-2 py-1 bg-white border border-crm-border rounded text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                                      />
+                                    </div>
+                                  )}
+
+                                  {entry.source === "fixed" && (
+                                    <div className="sm:col-span-2">
+                                      <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
+                                        Fixed Value
+                                      </label>
+                                      <input
+                                        type="text"
+                                        placeholder={`Fixed value for {{${placeholder}}}...`}
+                                        value={entry.value || ""}
+                                        onChange={(e) => {
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              ...entry,
+                                              value: e.target.value,
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        }}
+                                        className="w-full px-2 py-1 bg-white border border-crm-border rounded text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                                      />
+                                    </div>
+                                  )}
+
+                                  {(entry.source === "contact_field" || entry.source === "contact_attribute") && (
+                                    <div>
+                                      <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
+                                        Optional Fallback <span className="text-crm-textMuted font-normal">(used if empty)</span>
+                                      </label>
+                                      <input
+                                        type="text"
+                                        placeholder='e.g. "there" or "Valued Customer"'
+                                        value={entry.fallback || ""}
+                                        onChange={(e) => {
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              ...entry,
+                                              fallback: e.target.value,
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        }}
+                                        className="w-full px-2 py-1 bg-white border border-crm-border rounded text-xs text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {(step.kind === "check_order_placed" ||
               step.kind === "check_customer_replied_confirm" ||
@@ -557,7 +904,7 @@ export const JourneysPage: React.FC = () => {
       return;
     }
 
-    const validationErr = validateFriendlySteps(steps);
+    const validationErr = validateFriendlySteps(steps, templates);
     if (validationErr) {
       setModalError(validationErr);
       return;
@@ -724,9 +1071,18 @@ export const JourneysPage: React.FC = () => {
                 return (
                   <tr key={journey.id} className="hover:bg-crm-elevated/30 transition-colors">
                     <td className="py-3 px-4 font-medium text-crm-text">
-                      <div className="flex items-center gap-2">
-                        <GitBranch className="w-3.5 h-3.5 text-crm-accent" />
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <GitBranch className="w-3.5 h-3.5 text-crm-accent shrink-0" />
                         <span>{journey.name}</span>
+                        {journeyNeedsVariableMapping(journey, templates) && (
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-800 border border-amber-300"
+                            title="This journey has template placeholders without variable mappings"
+                          >
+                            <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                            Needs variable mapping
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="py-3 px-4 text-crm-textSecondary">

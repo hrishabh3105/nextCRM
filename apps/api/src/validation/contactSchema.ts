@@ -42,15 +42,17 @@ export const createContactSchema = z.object({
       "attributes cannot have more than 20 keys"
     )
     .optional(),
+  consentAttested: z.boolean().optional(),
 });
 
 /**
  * Validation schema for updating an existing Contact.
  * Same shape as createContactSchema, but all fields are optional,
- * and includes an optional optedIn boolean to record consent or opt-out.
+ * and includes optional optedIn and consentAttested booleans to record consent or opt-out.
  */
 export const updateContactSchema = createContactSchema.partial().extend({
   optedIn: z.boolean().optional(),
+  consentAttested: z.boolean().optional(),
 });
 
 export type CreateContactInput = z.infer<typeof createContactSchema>;

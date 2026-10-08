@@ -1,5 +1,12 @@
 import { prisma } from "@nextcrm/db";
-import { forWorkspace } from "@nextcrm/core";
+import {
+  forWorkspace,
+  setMarketingConsent,
+  isStopKeyword,
+  isStartKeyword,
+  decryptToken,
+  sendFreeformMessage,
+} from "@nextcrm/core";
 import { normalizePhoneE164 } from "../utils/phone";
 
 /**
@@ -88,8 +95,7 @@ export async function handleInboundWebhookPayload(payload: any): Promise<void> {
               data: {
                 phone: normalizedPhone,
                 name: profileName,
-                // Inbound message from a user is a direct consent signal, auto-opt-in immediately
-                optedInAt: new Date(),
+                // Default consent status is UNKNOWN — normal inbound text does not grant marketing consent
               } as any,
             });
           } catch (err: any) {
@@ -191,6 +197,84 @@ export async function handleInboundWebhookPayload(payload: any): Promise<void> {
             windowExpiresAt,
           },
         });
+
+        // 4. Process STOP / START marketing consent keywords idempotently
+        const rawBody = message.text?.body;
+        if (rawBody && typeof rawBody === "string") {
+          if (isStopKeyword(rawBody)) {
+            await setMarketingConsent(db, {
+              contactId: contact.id,
+              status: "OPTED_OUT",
+              source: "INBOUND_STOP",
+              evidence: { text: rawBody, messageId: message.id },
+            });
+
+            const workspace = await db.workspace.findUnique({
+              where: { id: channel.workspaceId },
+            });
+            const workspaceName = workspace?.name || "our store";
+            const confirmationText = `You've been unsubscribed from promotional messages from ${workspaceName}. Reply START to subscribe again.`;
+
+            if (channel.accessTokenEnc && channel.phoneNumberId) {
+              try {
+                const accessToken = decryptToken(channel.accessTokenEnc);
+                const sendResult = await sendFreeformMessage({
+                  accessToken,
+                  phoneNumberId: channel.phoneNumberId,
+                  to: contact.phone,
+                  body: confirmationText,
+                });
+
+                await db.message.create({
+                  data: {
+                    conversationId: conversation.id,
+                    contactId: contact.id,
+                    direction: "outbound",
+                    providerMessageId: sendResult.providerMessageId,
+                    body: confirmationText,
+                    status: "sent",
+                  } as any,
+                });
+              } catch (sendErr) {
+                console.warn(`[webhook] Failed to send STOP confirmation message:`, sendErr);
+              }
+            }
+          } else if (isStartKeyword(rawBody)) {
+            await setMarketingConsent(db, {
+              contactId: contact.id,
+              status: "OPTED_IN",
+              source: "INBOUND_START",
+              evidence: { text: rawBody, messageId: message.id },
+            });
+
+            const confirmationText = "You're subscribed again. Reply STOP anytime to unsubscribe.";
+
+            if (channel.accessTokenEnc && channel.phoneNumberId) {
+              try {
+                const accessToken = decryptToken(channel.accessTokenEnc);
+                const sendResult = await sendFreeformMessage({
+                  accessToken,
+                  phoneNumberId: channel.phoneNumberId,
+                  to: contact.phone,
+                  body: confirmationText,
+                });
+
+                await db.message.create({
+                  data: {
+                    conversationId: conversation.id,
+                    contactId: contact.id,
+                    direction: "outbound",
+                    providerMessageId: sendResult.providerMessageId,
+                    body: confirmationText,
+                    status: "sent",
+                  } as any,
+                });
+              } catch (sendErr) {
+                console.warn(`[webhook] Failed to send START confirmation message:`, sendErr);
+              }
+            }
+          }
+        }
       }
     }
   }

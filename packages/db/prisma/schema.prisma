@@ -25,6 +25,7 @@ model Workspace {
   carts            Cart[]
   journeys         Journey[]
   journeyRuns      JourneyRun[]
+  consentEvents    ConsentEvent[]
 
   @@map("workspaces")
 }
@@ -78,10 +79,15 @@ model Contact {
   phone       String
   email       String?
   name        String?
-  attributes  Json?
-  optedInAt   DateTime? @map("opted_in_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  attributes             Json?
+  marketingConsentStatus ConsentStatus       @default(UNKNOWN) @map("marketing_consent_status")
+  marketingConsentSource String?             @map("marketing_consent_source")
+  marketingConsentAt     DateTime?           @map("marketing_consent_at")
+  marketingOptedOutAt    DateTime?           @map("marketing_opted_out_at")
+  // @deprecated Use marketingConsentStatus, marketingConsentAt, marketingOptedOutAt instead
+  optedInAt              DateTime?           @map("opted_in_at")
+  createdAt              DateTime            @default(now()) @map("created_at")
+  updatedAt              DateTime            @updatedAt @map("updated_at")
 
   workspace          Workspace           @relation(fields: [workspaceId], references: [id])
   campaignRecipients CampaignRecipient[]
@@ -90,6 +96,7 @@ model Contact {
   orders             Order[]
   carts              Cart[]
   journeyRuns        JourneyRun[]
+  consentEvents      ConsentEvent[]
 
   @@unique([workspaceId, phone])
   @@index([workspaceId])
@@ -271,11 +278,17 @@ model StoreConnection {
   id             String   @id @default(cuid())
   workspaceId    String   @map("workspace_id")
   shopDomain     String   @unique @map("shop_domain")
-  accessTokenEnc String   @map("access_token_enc")
+  authMode       String   @default("client_credentials") @map("auth_mode")
+  accessTokenEnc String?  @map("access_token_enc")
+  // Legacy per-store API secret (used for webhook verification in old custom apps)
   apiSecretEnc   String?  @map("api_secret_enc")
-  status         String   @default("pending")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  grantedScopes                    String?   @map("granted_scopes")
+  status                           String    @default("pending")
+  treatShopifySmsAsWhatsappConsent Boolean   @default(true) @map("treat_shopify_sms_as_whatsapp_consent")
+  consentAttestedAt                DateTime? @map("consent_attested_at")
+  consentAttestedByUserId          String?   @map("consent_attested_by_user_id")
+  createdAt                        DateTime  @default(now()) @map("created_at")
+  updatedAt                        DateTime  @updatedAt @map("updated_at")
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
 
@@ -383,5 +396,28 @@ model JourneyRun {
   // absent from this model definition. Do not add an @@index or
   // @@unique attempting to represent it.
   @@map("journey_runs")
+}
+
+enum ConsentStatus {
+  OPTED_IN
+  OPTED_OUT
+  UNKNOWN
+}
+
+model ConsentEvent {
+  id             String         @id @default(cuid())
+  workspaceId    String         @map("workspace_id")
+  contactId      String         @map("contact_id")
+  status         ConsentStatus
+  previousStatus ConsentStatus? @map("previous_status")
+  source         String
+  evidence       Json?
+  createdAt      DateTime       @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  contact   Contact   @relation(fields: [contactId], references: [id])
+
+  @@index([workspaceId, contactId, createdAt])
+  @@map("consent_events")
 }
 

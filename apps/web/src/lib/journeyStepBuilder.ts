@@ -7,8 +7,21 @@
  * Pure logic — kept strictly separate from UI components for independent reasoning and unit testing.
  */
 
+export type VariableMappingEntry = {
+  source: "contact_field" | "contact_attribute" | "fixed";
+  field?: "name" | "email" | "phone";
+  key?: string;
+  value?: string;
+  fallback?: string;
+};
+
 export type FriendlyStep =
-  | { kind: "send_message"; templateId: string; channelId: string }
+  | {
+      kind: "send_message";
+      templateId: string;
+      channelId: string;
+      variableMapping?: Record<string, VariableMappingEntry>;
+    }
   | { kind: "wait"; amount: number; unit: "minutes" | "hours" | "days" }
   | {
       kind:
@@ -24,6 +37,7 @@ export interface EngineSendMessageStep {
   templateId: string;
   channelId: string;
   variables: string[];
+  variableMapping?: Record<string, VariableMappingEntry>;
 }
 
 export interface EngineWaitStep {
@@ -191,6 +205,7 @@ export function flattenToEngineSteps(friendlySteps: FriendlyStep[]): any[] {
           templateId: step.templateId,
           channelId: step.channelId,
           variables: [],
+          variableMapping: step.variableMapping || {},
         });
       } else if (
         step.kind === "check_order_placed" ||
@@ -268,4 +283,25 @@ export function flattenToEngineSteps(friendlySteps: FriendlyStep[]): any[] {
   }
 
   return output;
+}
+
+/**
+ * Reconciles variable mappings when the selected template changes:
+ * drops mapping keys that no longer exist in the new template placeholders,
+ * and preserves matching ones.
+ */
+export function reconcileVariableMapping(
+  existingMapping: Record<string, VariableMappingEntry> | undefined,
+  newPlaceholders: string[]
+): Record<string, VariableMappingEntry> {
+  const result: Record<string, VariableMappingEntry> = {};
+  if (!existingMapping || typeof existingMapping !== "object") return result;
+
+  for (const placeholder of newPlaceholders) {
+    if (existingMapping[placeholder]) {
+      result[placeholder] = existingMapping[placeholder];
+    }
+  }
+
+  return result;
 }

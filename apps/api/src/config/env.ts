@@ -23,4 +23,7 @@ export const env = {
   // Note: This is a different value from META_APP_SECRET.
   META_APP_ID: required("META_APP_ID"),
   PUBLIC_WEBHOOK_BASE_URL: process.env.PUBLIC_WEBHOOK_BASE_URL || "",
+  SHOPIFY_CLIENT_ID: required("SHOPIFY_CLIENT_ID"),
+  SHOPIFY_CLIENT_SECRET: required("SHOPIFY_CLIENT_SECRET"),
+  SHOPIFY_API_VERSION: process.env.SHOPIFY_API_VERSION || "2026-07",
 };

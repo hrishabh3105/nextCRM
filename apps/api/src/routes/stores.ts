@@ -3,69 +3,28 @@ import {
   ApiError,
   forWorkspace,
   validateOrThrow,
-  encryptToken,
-  decryptToken,
   verifyStoreConnection,
-  registerWebhook,
+  registerWebhooks,
+  getShopifyAccessToken,
 } from "@nextcrm/core";
 import { env } from "../config/env";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
   createStoreConnectionSchema,
   CreateStoreConnectionInput,
-  reconnectStoreConnectionSchema,
-  ReconnectStoreConnectionInput,
+  updateStoreConsentSettingsSchema,
+  UpdateStoreConsentSettingsInput,
 } from "../validation/storeConnectionSchema";
 
 export const storesRouter = Router();
 
 /**
- * Shared helper to verify store connectivity and register Shopify webhooks.
- * Used during initial connection (POST /) and reconnection/refresh (PATCH /:id/reconnect).
- */
-async function verifyAndRegisterWebhooks(params: {
-  shopDomain: string;
-  accessToken: string;
-}): Promise<{ isVerified: boolean }> {
-  const { shopDomain, accessToken } = params;
-
-  const isVerified = await verifyStoreConnection({
-    shopDomain,
-    accessToken,
-  });
-
-  if (isVerified) {
-    const webhookUrl = `${env.PUBLIC_WEBHOOK_BASE_URL.trim()}/webhooks/shopify`;
-    const topics = [
-      "orders/create",
-      "orders/updated",
-      "checkouts/create",
-      "checkouts/update",
-    ];
-
-    for (const topic of topics) {
-      const result = await registerWebhook({
-        shopDomain,
-        accessToken,
-        topic,
-        address: webhookUrl,
-      });
-
-      if (!result.success) {
-        console.warn(
-          `[shopify] Failed to register webhook topic "${topic}" for store ${shopDomain} at ${webhookUrl}`
-        );
-      }
-    }
-  }
-
-  return { isVerified };
-}
-
-/**
  * POST /
  * Connects a new Shopify store for the authenticated workspace.
- * Encrypts the raw accessToken and apiSecretKey using AES-256-GCM before saving to database.
+ *
+ * NOTE: DEV-ONLY: This client-credentials path only works for stores in our own
+ * Shopify organization. Real merchants will need the OAuth install flow.
+ *
  * CRITICAL: accessTokenEnc and apiSecretEnc are explicitly stripped out and NEVER returned to the client.
  */
 storesRouter.post(
@@ -76,51 +35,42 @@ storesRouter.post(
       req.body
     );
 
-    const { shopDomain, accessToken, apiSecretKey } = validatedData;
-    const accessTokenEnc = encryptToken(accessToken);
+    const { shopDomain } = validatedData;
+
+    // Get an access token via client credentials.
+    // Fails clearly with ApiError(400) if the app isn't installed or the store is not in the organization.
+    const tokenResponse = await getShopifyAccessToken(shopDomain);
+
+    const isVerified = await verifyStoreConnection(shopDomain);
+    const status = isVerified ? "connected" : "pending";
+    const verificationWarning = isVerified
+      ? undefined
+      : "Could not verify this store connection with Shopify. Double check your credentials.";
 
     // Creates the StoreConnection record. P2002 unique constraint violations on shopDomain
     // propagate to the global errorHandler middleware, which returns HTTP 409.
     const store = await forWorkspace(req.workspaceId!).storeConnection.create({
       data: {
         shopDomain,
-        accessTokenEnc,
-        status: "pending",
+        authMode: "client_credentials",
+        grantedScopes: tokenResponse.scope,
+        status,
       } as any,
     });
 
-    let currentStore = store;
-    let verificationWarning: string | undefined = undefined;
-
-    const { isVerified } = await verifyAndRegisterWebhooks({
-      shopDomain,
-      accessToken,
-    });
-
-    if (isVerified) {
-      const apiSecretEnc = encryptToken(apiSecretKey);
-
-      currentStore = await forWorkspace(req.workspaceId!).storeConnection.update({
-        where: { id: store.id },
-        data: {
-          status: "connected",
-          apiSecretEnc,
-        },
-      });
-    } else {
-      verificationWarning =
-        "Could not verify this store connection with Shopify. Double check your credentials.";
-    }
+    const webhookAddress = `${env.PUBLIC_WEBHOOK_BASE_URL.trim()}/webhooks/shopify`;
+    const webhooks = await registerWebhooks(shopDomain, webhookAddress);
 
     // Explicitly exclude accessTokenEnc and apiSecretEnc from response
     const {
       accessTokenEnc: _strippedToken,
       apiSecretEnc: _strippedSecret,
       ...safeStore
-    } = currentStore;
+    } = store;
 
     res.status(201).json({
       ...safeStore,
+      webhooks,
       ...(verificationWarning ? { verificationWarning } : {}),
     });
   })
@@ -128,17 +78,13 @@ storesRouter.post(
 
 /**
  * PATCH /:id/reconnect
- * Reconnects or refreshes credentials / webhooks for an existing Shopify store connection.
- * Both accessToken and apiSecretKey are optional: if omitted, stored (decrypted) credentials are reused.
+ * Reconnects or refreshes webhooks for an existing Shopify store connection.
+ * No body needed; re-verifies connectivity, re-runs webhook registration, updates status,
+ * and returns the updated store along with the webhooks registration results.
  */
 storesRouter.patch(
   "/:id/reconnect",
   asyncHandler(async (req: Request, res: Response) => {
-    const validatedData = validateOrThrow<ReconnectStoreConnectionInput>(
-      reconnectStoreConnectionSchema,
-      req.body
-    );
-
     const store = await forWorkspace(req.workspaceId!).storeConnection.findUnique({
       where: { id: req.params.id },
     });
@@ -147,41 +93,18 @@ storesRouter.patch(
       throw new ApiError(404, "Store connection not found");
     }
 
-    const { accessToken, apiSecretKey } = validatedData;
+    const isVerified = await verifyStoreConnection(store.shopDomain);
+    const webhookAddress = `${env.PUBLIC_WEBHOOK_BASE_URL.trim()}/webhooks/shopify`;
+    const webhooks = await registerWebhooks(store.shopDomain, webhookAddress);
 
-    // Use new accessToken if provided, otherwise decrypt existing stored token
-    const effectiveAccessToken = accessToken
-      ? accessToken.trim()
-      : decryptToken(store.accessTokenEnc);
-
-    const updateData: Record<string, any> = {};
-
-    if (accessToken) {
-      updateData.accessTokenEnc = encryptToken(accessToken.trim());
-    }
-
-    if (apiSecretKey) {
-      updateData.apiSecretEnc = encryptToken(apiSecretKey.trim());
-    }
-
-    const { isVerified } = await verifyAndRegisterWebhooks({
-      shopDomain: store.shopDomain,
-      accessToken: effectiveAccessToken,
-    });
-
-    let verificationWarning: string | undefined = undefined;
-
-    if (isVerified) {
-      updateData.status = "connected";
-    } else {
-      updateData.status = "pending";
-      verificationWarning =
-        "Could not verify this store connection with Shopify. Double check your credentials.";
-    }
+    const status = isVerified ? "connected" : "pending";
+    const verificationWarning = isVerified
+      ? undefined
+      : "Could not verify this store connection with Shopify. Double check your credentials.";
 
     const updatedStore = await forWorkspace(req.workspaceId!).storeConnection.update({
       where: { id: store.id },
-      data: updateData,
+      data: { status },
     });
 
     const {
@@ -192,6 +115,7 @@ storesRouter.patch(
 
     res.status(200).json({
       ...safeStore,
+      webhooks,
       ...(verificationWarning ? { verificationWarning } : {}),
     });
   })
@@ -218,5 +142,57 @@ storesRouter.get(
     );
 
     res.status(200).json(safeStores);
+  })
+);
+
+/**
+ * PATCH /:id/consent-settings
+ * Updates whether to treat Shopify SMS marketing subscription as WhatsApp consent.
+ * Enabling requires confirmWording: true and records consentAttestedAt and consentAttestedByUserId.
+ */
+storesRouter.patch(
+  "/:id/consent-settings",
+  asyncHandler(async (req: Request, res: Response) => {
+    const validatedData = validateOrThrow<UpdateStoreConsentSettingsInput>(
+      updateStoreConsentSettingsSchema,
+      req.body
+    );
+
+    const store = await forWorkspace(req.workspaceId!).storeConnection.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!store) {
+      throw new ApiError(404, "Store connection not found");
+    }
+
+    const { treatShopifySmsAsWhatsappConsent, confirmWording } = validatedData;
+    const updateData: any = {
+      treatShopifySmsAsWhatsappConsent,
+    };
+
+    if (treatShopifySmsAsWhatsappConsent) {
+      if (confirmWording !== true) {
+        throw new ApiError(
+          400,
+          "confirmWording must be true to enable treating Shopify SMS as WhatsApp consent"
+        );
+      }
+      updateData.consentAttestedAt = new Date();
+      updateData.consentAttestedByUserId = (req as any).user?.id || (req as any).userId || null;
+    }
+
+    const updatedStore = await forWorkspace(req.workspaceId!).storeConnection.update({
+      where: { id: store.id },
+      data: updateData,
+    });
+
+    const {
+      accessTokenEnc: _strippedToken,
+      apiSecretEnc: _strippedSecret,
+      ...safeStore
+    } = updatedStore;
+
+    res.status(200).json(safeStore);
   })
 );

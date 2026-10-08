@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { ApiError, forWorkspace, validateOrThrow } from "@nextcrm/core";
+import { ApiError, forWorkspace, validateOrThrow, evaluateSendPermission } from "@nextcrm/core";
 import { asyncHandler } from "../middleware/asyncHandler";
 import {
   createCampaignSchema,
@@ -53,6 +53,75 @@ campaignsRouter.get(
     });
 
     res.status(200).json(campaigns);
+  })
+);
+
+/**
+ * POST /audience-count
+ * Sizing and consent breakdown for a given segment and optional template.
+ * Response: { totalMatching, eligible, skippedNoConsent, skippedOptedOut }
+ */
+campaignsRouter.post(
+  "/audience-count",
+  asyncHandler(async (req: Request, res: Response) => {
+    const { templateId, segment } = req.body;
+    const db = forWorkspace(req.workspaceId!);
+
+    let template = null;
+    if (templateId) {
+      template = await db.template.findUnique({
+        where: { id: templateId },
+      });
+    }
+
+    let contactWhere: any = {};
+    if (segment && typeof segment === "object" && "type" in segment) {
+      if (segment.type === "contact_ids" && Array.isArray(segment.contactIds)) {
+        contactWhere = {
+          id: { in: segment.contactIds },
+        };
+      } else if (segment.type === "filter" && Array.isArray(segment.conditions)) {
+        contactWhere = {
+          AND: segment.conditions.map((c: any) => ({
+            attributes: {
+              path: [c.key],
+              equals: c.value,
+            },
+          })),
+        };
+      }
+    }
+
+    const contacts = await db.contact.findMany({
+      where: contactWhere,
+    });
+
+    let eligible = 0;
+    let skippedNoConsent = 0;
+    let skippedOptedOut = 0;
+
+    for (const contact of contacts) {
+      const permission = evaluateSendPermission({
+        contact,
+        template,
+        context: "campaign",
+      });
+
+      if (permission.allowed) {
+        eligible++;
+      } else if (permission.reason === "OPTED_OUT") {
+        skippedOptedOut++;
+      } else {
+        skippedNoConsent++;
+      }
+    }
+
+    res.status(200).json({
+      totalMatching: contacts.length,
+      eligible,
+      skippedNoConsent,
+      skippedOptedOut,
+    });
   })
 );
 
