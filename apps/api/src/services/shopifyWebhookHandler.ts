@@ -4,6 +4,7 @@ import {
   setMarketingConsent,
   getCustomerWhatsAppConsent,
   CustomerWhatsAppConsentResult,
+  convertCartsForOrder,
 } from "@nextcrm/core";
 import { normalizePhoneE164, isValidE164 } from "../utils/phone";
 
@@ -322,6 +323,7 @@ export async function processShopifyConsent(
             status: currentContact.marketingConsentStatus || "UNKNOWN",
             previousStatus: currentContact.marketingConsentStatus || null,
             source: "SHOPIFY_SMS",
+            occurredAt: consentUpdatedAt ?? null,
             evidence: {
               ...evidence,
               phoneMismatch: true,
@@ -371,6 +373,7 @@ export async function processShopifyConsent(
             status: currentContact.marketingConsentStatus || "UNKNOWN",
             previousStatus: currentContact.marketingConsentStatus || null,
             source: "SHOPIFY_SMS",
+            occurredAt: consentUpdatedAt ?? null,
             evidence: {
               ...evidence,
               ignoredDueToSetting: true,
@@ -394,7 +397,8 @@ export async function handleShopifyOrder(
   storeConnection?: {
     treatShopifySmsAsWhatsappConsent?: boolean;
     shopDomain?: string;
-  } | null
+  } | null,
+  dbOverride?: any
 ): Promise<void> {
   if (!payload || !payload.id) {
     console.warn(`[shopify-webhook] Received order payload without id, skipping`);
@@ -405,8 +409,10 @@ export async function handleShopifyOrder(
   const totalPrice = payload.total_price != null ? String(payload.total_price) : "0.00";
   const currency = payload.currency || "USD";
   const status = payload.financial_status ?? "unknown";
+  const checkoutToken = payload.checkout_token ? String(payload.checkout_token) : null;
+  const cartToken = payload.cart_token ? String(payload.cart_token) : null;
 
-  const db = forWorkspace(workspaceId);
+  const db = dbOverride || forWorkspace(workspaceId);
   const contact = await resolveOrCreateContact(db, payload);
   const contactId = contact?.id ?? null;
 
@@ -422,8 +428,17 @@ export async function handleShopifyOrder(
     });
   }
 
+  const orderNumber =
+    payload.order_number != null
+      ? String(payload.order_number)
+      : payload.name != null
+      ? String(payload.name)
+      : null;
+  const lineItems = Array.isArray(payload.line_items) ? payload.line_items : null;
+
+  let createdOrder: any = null;
   try {
-    await db.order.upsert({
+    createdOrder = await db.order.upsert({
       where: {
         workspaceId_shopifyOrderId: {
           workspaceId,
@@ -434,14 +449,22 @@ export async function handleShopifyOrder(
         status,
         totalPrice,
         currency,
+        orderNumber: orderNumber ?? undefined,
+        lineItems: lineItems ?? undefined,
         contactId: contactId ?? undefined,
+        checkoutToken: checkoutToken ?? undefined,
+        cartToken: cartToken ?? undefined,
       },
       create: {
         shopifyOrderId,
+        orderNumber: orderNumber ?? undefined,
         status,
         totalPrice,
         currency,
+        lineItems: lineItems ?? undefined,
         contactId: contactId ?? undefined,
+        checkoutToken: checkoutToken ?? undefined,
+        cartToken: cartToken ?? undefined,
       } as any,
     });
   } catch (err: any) {
@@ -449,12 +472,32 @@ export async function handleShopifyOrder(
       console.warn(
         `[shopify-webhook] Concurrent race condition on order upsert (P2002): shopifyOrderId=${shopifyOrderId}`
       );
+      createdOrder = await db.order.findFirst({
+        where: { shopifyOrderId },
+      });
     } else {
       console.error(
         `[shopify-webhook] Error upserting order ${shopifyOrderId}:`,
         err
       );
     }
+  }
+
+  // Convert matching carts and cancel active abandoned-cart journeys
+  try {
+    await convertCartsForOrder({
+      db,
+      workspaceId,
+      checkoutToken,
+      cartToken,
+      orderId: shopifyOrderId,
+      convertedAt: payload.created_at ? new Date(payload.created_at) : new Date(),
+    });
+  } catch (cartErr) {
+    console.error(
+      `[shopify-webhook] Error converting carts for order ${shopifyOrderId}:`,
+      cartErr
+    );
   }
 
   /**
@@ -478,6 +521,7 @@ export async function handleShopifyOrder(
       triggerEvent: "order_placed_cod",
       contactId,
       triggerContextId: String(payload.id),
+      orderId: createdOrder?.id,
     });
   }
 }
@@ -492,7 +536,8 @@ export async function handleShopifyCheckout(
   storeConnection?: {
     treatShopifySmsAsWhatsappConsent?: boolean;
     shopDomain?: string;
-  } | null
+  } | null,
+  dbOverride?: any
 ): Promise<void> {
   if (!payload || !payload.token) {
     console.warn(`[shopify-webhook] Received checkout payload without token, skipping`);
@@ -500,10 +545,17 @@ export async function handleShopifyCheckout(
   }
 
   const shopifyCartId = String(payload.token);
+  const checkoutToken = String(payload.token);
+  const cartToken = payload.cart_token ? String(payload.cart_token) : null;
   const totalPrice = payload.total_price != null ? String(payload.total_price) : "0.00";
+  const recoveryUrl = payload.abandoned_checkout_url
+    ? String(payload.abandoned_checkout_url)
+    : null;
+  const currency = payload.currency ? String(payload.currency) : "USD";
+  const lineItems = Array.isArray(payload.line_items) ? payload.line_items : null;
   const lastActivityAt = new Date();
 
-  const db = forWorkspace(workspaceId);
+  const db = dbOverride || forWorkspace(workspaceId);
   const contact = await resolveOrCreateContact(db, payload);
   const contactId = contact?.id ?? null;
 
@@ -519,6 +571,28 @@ export async function handleShopifyCheckout(
     });
   }
 
+  // Check if checkout is already completed via completed_at
+  const isCompletedAt = payload.completed_at != null;
+  const completedAtDate = isCompletedAt ? new Date(payload.completed_at) : null;
+
+  // Handle ordering race: check if an Order was already recorded for this checkout/cart token
+  const orderFilters: any[] = [];
+  if (checkoutToken) orderFilters.push({ checkoutToken });
+  if (cartToken) orderFilters.push({ cartToken });
+
+  const existingOrder = orderFilters.length > 0
+    ? await db.order.findFirst({
+        where: { OR: orderFilters },
+      })
+    : null;
+
+  const isAlreadyConverted = isCompletedAt || existingOrder != null;
+  const targetStatus = isAlreadyConverted ? "converted" : status;
+  const convertedAt = completedAtDate ?? (existingOrder ? existingOrder.createdAt : null);
+  const linkedOrderId = existingOrder
+    ? existingOrder.shopifyOrderId
+    : (payload.order_id ? String(payload.order_id) : null);
+
   let cart: any = null;
   try {
     cart = await db.cart.upsert({
@@ -529,17 +603,31 @@ export async function handleShopifyCheckout(
         },
       },
       update: {
-        status,
+        status: targetStatus,
         totalPrice,
+        currency,
+        recoveryUrl: recoveryUrl ?? undefined,
+        lineItems: lineItems ?? undefined,
         lastActivityAt,
         contactId: contactId ?? undefined,
+        checkoutToken,
+        cartToken: cartToken ?? undefined,
+        convertedAt: isAlreadyConverted ? (convertedAt ?? new Date()) : undefined,
+        orderId: linkedOrderId ?? undefined,
       },
       create: {
         shopifyCartId,
-        status,
+        checkoutToken,
+        cartToken: cartToken ?? undefined,
+        status: targetStatus,
         totalPrice,
+        currency,
+        recoveryUrl: recoveryUrl ?? undefined,
+        lineItems: lineItems ?? undefined,
         lastActivityAt,
         contactId: contactId ?? undefined,
+        convertedAt: isAlreadyConverted ? (convertedAt ?? new Date()) : undefined,
+        orderId: linkedOrderId ?? undefined,
       } as any,
     });
   } catch (err: any) {
@@ -558,7 +646,26 @@ export async function handleShopifyCheckout(
     }
   }
 
-  if (contactId && cart?.id) {
+  // If completed_at is non-null, run conversion logic to mark any matching carts & exit runs
+  if (isCompletedAt) {
+    try {
+      await convertCartsForOrder({
+        db,
+        workspaceId,
+        checkoutToken,
+        cartToken,
+        orderId: linkedOrderId,
+        convertedAt: completedAtDate,
+      });
+    } catch (convErr) {
+      console.error(
+        `[shopify-webhook] Error converting carts on completed checkout ${shopifyCartId}:`,
+        convErr
+      );
+    }
+  }
+
+  if (contactId && cart?.id && !isAlreadyConverted && cart.status !== "converted") {
     /**
      * Note on cart abandonment trigger timing:
      * For THIS pass, we trigger on checkouts/create OR checkouts/update firing at all —
@@ -573,7 +680,12 @@ export async function handleShopifyCheckout(
       triggerEvent: "cart_abandoned",
       contactId,
       triggerContextId: cart.id,
+      cartId: cart.id,
     });
+  } else if (isAlreadyConverted) {
+    console.log(
+      `[shopify-webhook] Cart ${shopifyCartId} is already converted (order: ${linkedOrderId ?? "completed"}). Skipping cart_abandoned journey trigger.`
+    );
   }
 }
 
@@ -587,7 +699,8 @@ export async function handleShopifyOrderUpdate(
   storeConnection?: {
     treatShopifySmsAsWhatsappConsent?: boolean;
     shopDomain?: string;
-  } | null
+  } | null,
+  dbOverride?: any
 ): Promise<void> {
   if (!payload || !payload.id) {
     console.warn(`[shopify-webhook] Received order update payload without id, skipping`);
@@ -595,7 +708,7 @@ export async function handleShopifyOrderUpdate(
   }
 
   const shopifyOrderId = String(payload.id);
-  const db = forWorkspace(workspaceId);
+  const db = dbOverride || forWorkspace(workspaceId);
   const contact = await resolveOrCreateContact(db, payload);
   const contactId = contact?.id ?? null;
 
@@ -619,9 +732,19 @@ export async function handleShopifyOrderUpdate(
   const newFulfillment = payload.fulfillment_status ?? null;
   const totalPrice = payload.total_price != null ? String(payload.total_price) : "0.00";
   const currency = payload.currency || "USD";
+  const checkoutToken = payload.checkout_token ? String(payload.checkout_token) : null;
+  const cartToken = payload.cart_token ? String(payload.cart_token) : null;
+  const orderNumber =
+    payload.order_number != null
+      ? String(payload.order_number)
+      : payload.name != null
+      ? String(payload.name)
+      : null;
+  const lineItems = Array.isArray(payload.line_items) ? payload.line_items : null;
 
+  let updatedOrder: any = null;
   try {
-    await db.order.upsert({
+    updatedOrder = await db.order.upsert({
       where: {
         workspaceId_shopifyOrderId: {
           workspaceId,
@@ -633,15 +756,23 @@ export async function handleShopifyOrderUpdate(
         fulfillmentStatus: newFulfillment,
         totalPrice,
         currency,
+        orderNumber: orderNumber ?? undefined,
+        lineItems: lineItems ?? undefined,
         contactId: contactId ?? undefined,
+        checkoutToken: checkoutToken ?? undefined,
+        cartToken: cartToken ?? undefined,
       },
       create: {
         shopifyOrderId,
+        orderNumber: orderNumber ?? undefined,
         status: newStatus,
         fulfillmentStatus: newFulfillment,
         totalPrice,
         currency,
+        lineItems: lineItems ?? undefined,
         contactId: contactId ?? undefined,
+        checkoutToken: checkoutToken ?? undefined,
+        cartToken: cartToken ?? undefined,
       } as any,
     });
   } catch (err: any) {
@@ -649,12 +780,33 @@ export async function handleShopifyOrderUpdate(
       console.warn(
         `[shopify-webhook] Concurrent race condition on order update upsert (P2002): shopifyOrderId=${shopifyOrderId}`
       );
+      updatedOrder = await db.order.findFirst({
+        where: { shopifyOrderId },
+      });
     } else {
       console.error(
         `[shopify-webhook] Error upserting order update ${shopifyOrderId}:`,
         err
       );
     }
+  }
+
+  // Convert matching carts and cancel active abandoned-cart journeys
+  // (orders/updated can be the first sight of the order)
+  try {
+    await convertCartsForOrder({
+      db,
+      workspaceId,
+      checkoutToken,
+      cartToken,
+      orderId: shopifyOrderId,
+      convertedAt: payload.created_at ? new Date(payload.created_at) : new Date(),
+    });
+  } catch (cartErr) {
+    console.error(
+      `[shopify-webhook] Error converting carts for order update ${shopifyOrderId}:`,
+      cartErr
+    );
   }
 
   // AFTER the upsert, if existing is not null (this order was already known to us)
@@ -669,6 +821,7 @@ export async function handleShopifyOrderUpdate(
             triggerEvent: "order_status_changed",
             contactId: targetContactId,
             triggerContextId: shopifyOrderId,
+            orderId: existing.id || updatedOrder?.id,
           });
         } catch (err) {
           console.error(
@@ -687,6 +840,7 @@ export async function handleShopifyOrderUpdate(
             triggerEvent: "order_delivered",
             contactId: targetContactId,
             triggerContextId: shopifyOrderId,
+            orderId: existing.id || updatedOrder?.id,
           });
         } catch (err) {
           console.error(

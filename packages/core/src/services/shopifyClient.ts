@@ -46,7 +46,8 @@ export function clearShopifyTokenCache(shopDomain?: string): void {
  * Never logs the token or the secret.
  */
 export async function getShopifyAccessToken(
-  shopDomain: string
+  shopDomain: string,
+  options?: { timeoutMs?: number }
 ): Promise<{ accessToken: string; scope: string }> {
   const shop = shopDomain.trim();
   const cached = tokenCache.get(shop);
@@ -73,6 +74,8 @@ export async function getShopifyAccessToken(
     throw new ApiError(500, "Shopify client credentials not configured in environment");
   }
 
+  const timeoutMs = options?.timeoutMs ?? 30000;
+
   const requestPromise = (async () => {
     try {
       const body = new URLSearchParams({
@@ -87,7 +90,7 @@ export async function getShopifyAccessToken(
           "Content-Type": "application/x-www-form-urlencoded",
         },
         body: body.toString(),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
       if (!response.ok) {
@@ -192,13 +195,13 @@ export async function shopifyGraphQL<T = any>(
     });
   }
 
-  let { accessToken } = await getShopifyAccessToken(shop);
+  let { accessToken } = await getShopifyAccessToken(shop, { timeoutMs });
   let response = await executeRequest(accessToken);
 
   // On a 401, clear that shop's cache entry and retry once
   if (response.status === 401) {
     tokenCache.delete(shop);
-    const refreshed = await getShopifyAccessToken(shop);
+    const refreshed = await getShopifyAccessToken(shop, { timeoutMs });
     accessToken = refreshed.accessToken;
     response = await executeRequest(accessToken);
   }
@@ -232,15 +235,35 @@ export async function shopifyGraphQL<T = any>(
   return json.data as T;
 }
 
+export const EXPECTED_WEBHOOK_TOPICS = [
+  "ORDERS_CREATE",
+  "ORDERS_UPDATED",
+  "CHECKOUTS_CREATE",
+  "CHECKOUTS_UPDATE",
+  "APP_UNINSTALLED",
+] as const;
+
+export const REQUIRED_APP_SCOPES = [
+  "read_orders",
+  "read_checkouts",
+  "read_customers",
+] as const;
+
 /**
  * Verifies connectivity to a Shopify store by querying shop name via GraphQL.
  * Soft check — returns true if valid, false on any failure (never throws).
+ * Uses a default 5-second timeout for rapid health checking.
  */
-export async function verifyStoreConnection(shopDomain: string): Promise<boolean> {
+export async function verifyStoreConnection(
+  shopDomain: string,
+  timeoutMs = 5000
+): Promise<boolean> {
   try {
     const data = await shopifyGraphQL<{ shop?: { name?: string } }>(
       shopDomain,
-      `query { shop { name } }`
+      `query { shop { name } }`,
+      undefined,
+      { timeoutMs }
     );
     return Boolean(data?.shop?.name);
   } catch {
@@ -264,13 +287,7 @@ export async function registerWebhooks(
   shopDomain: string,
   address: string
 ): Promise<RegisterWebhookResult[]> {
-  const topics = [
-    "ORDERS_CREATE",
-    "ORDERS_UPDATED",
-    "CHECKOUTS_CREATE",
-    "CHECKOUTS_UPDATE",
-    "APP_UNINSTALLED",
-  ];
+  const topics = EXPECTED_WEBHOOK_TOPICS;
 
   const mutation = `
     mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {

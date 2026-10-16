@@ -9,20 +9,44 @@ import {
   Clock,
   X,
   Loader2,
-  ShieldCheck,
   RefreshCw,
   AlertTriangle,
   HelpCircle,
+  ShieldAlert,
 } from "lucide-react";
+import { StoreHealthPanel } from "../components/StoreHealthPanel";
 
 export interface StoreConnection {
   id: string;
   workspaceId: string;
   shopDomain: string;
+  authMode?: string;
+  grantedScopes?: string | null;
   status: "connected" | "pending" | string;
+  treatShopifySmsAsWhatsappConsent: boolean;
+  consentAttestedAt?: string | null;
+  consentAttestedByUserId?: string | null;
   createdAt: string;
   updatedAt: string;
   verificationWarning?: string;
+}
+
+export const SHOPIFY_DOMAIN_REGEX = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+
+/**
+ * Normalizes user input for Shopify domain:
+ * 1. Trims whitespace and lowercases it.
+ * 2. Strips https://, http://, and any trailing slash, path, or query params.
+ * 3. Accepts a bare name (e.g. "nexcrm-test") and appends ".myshopify.com".
+ */
+export function normalizeShopDomain(raw: string): string {
+  let domain = raw.trim().toLowerCase();
+  domain = domain.replace(/^https?:\/\//, "");
+  domain = domain.split("/")[0].split("?")[0].split("#")[0].trim();
+  if (domain && !domain.includes(".")) {
+    domain = `${domain}.myshopify.com`;
+  }
+  return domain;
 }
 
 function formatDate(dateStr: string): string {
@@ -47,19 +71,18 @@ export const StoresPage: React.FC = () => {
 
   // Connect Store Modal State
   const [isConnectModalOpen, setIsConnectModalOpen] = useState<boolean>(false);
-  const [shopDomain, setShopDomain] = useState<string>("");
-  const [accessToken, setAccessToken] = useState<string>("");
-  const [apiSecretKey, setApiSecretKey] = useState<string>("");
+  const [shopDomainInput, setShopDomainInput] = useState<string>("");
   const [connectLoading, setConnectLoading] = useState<boolean>(false);
   const [connectError, setConnectError] = useState<string | null>(null);
-  const [connectWarning, setConnectWarning] = useState<string | null>(null);
 
-  // Reconnect Store Modal State
-  const [storeToReconnect, setStoreToReconnect] = useState<StoreConnection | null>(null);
-  const [reconnectAccessToken, setReconnectAccessToken] = useState<string>("");
-  const [reconnectApiSecretKey, setReconnectApiSecretKey] = useState<string>("");
-  const [reconnectLoading, setReconnectLoading] = useState<boolean>(false);
-  const [reconnectError, setReconnectError] = useState<string | null>(null);
+  // In-flight operation states
+  const [reconnectingId, setReconnectingId] = useState<string | null>(null);
+  const [updatingConsentId, setUpdatingConsentId] = useState<string | null>(null);
+
+  // Consent Confirmation Modal State (required when turning ON)
+  const [confirmConsentStore, setConfirmConsentStore] = useState<StoreConnection | null>(null);
+  const [confirmWordingChecked, setConfirmWordingChecked] = useState<boolean>(false);
+  const [confirmModalError, setConfirmModalError] = useState<string | null>(null);
 
   // Fetch stores list
   const fetchStores = useCallback(async () => {
@@ -87,50 +110,45 @@ export const StoresPage: React.FC = () => {
 
   // Open Connect Modal
   const handleOpenConnectModal = () => {
-    setShopDomain("");
-    setAccessToken("");
-    setApiSecretKey("");
+    setShopDomainInput("");
     setConnectError(null);
-    setConnectWarning(null);
     setIsConnectModalOpen(true);
   };
 
   // Submit Connect Store
   const handleConnectSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmedDomain = shopDomain.trim().toLowerCase();
-    const trimmedToken = accessToken.trim();
-    const trimmedSecret = apiSecretKey.trim();
+    setConnectError(null);
 
-    if (!trimmedDomain || !trimmedToken || !trimmedSecret) {
-      setConnectError("All fields are required to connect your Shopify store.");
+    const normalizedDomain = normalizeShopDomain(shopDomainInput);
+
+    if (!normalizedDomain) {
+      setConnectError("Shopify store domain is required.");
       return;
     }
 
-    if (!/^[a-z0-9-]+\.myshopify\.com$/.test(trimmedDomain)) {
-      setConnectError("Shop domain must be a valid myshopify.com domain (e.g. your-store.myshopify.com).");
+    if (!SHOPIFY_DOMAIN_REGEX.test(normalizedDomain)) {
+      setConnectError(
+        "Please enter a valid Shopify domain matching [store-name].myshopify.com (e.g. nexcrm-test or nexcrm-test.myshopify.com)."
+      );
       return;
     }
 
     setConnectLoading(true);
-    setConnectError(null);
-    setConnectWarning(null);
 
     try {
       const newStore = await api.post<StoreConnection>("/api/v1/stores", {
-        shopDomain: trimmedDomain,
-        accessToken: trimmedToken,
-        apiSecretKey: trimmedSecret,
+        shopDomain: normalizedDomain,
       });
 
       setStores((prev) => [newStore, ...prev.filter((s) => s.id !== newStore.id)]);
 
       if (newStore.verificationWarning) {
-        setConnectWarning(newStore.verificationWarning);
+        setSuccessMessage(`Store "${normalizedDomain}" connected with warning: ${newStore.verificationWarning}`);
       } else {
-        setSuccessMessage(`Shopify store "${trimmedDomain}" connected and webhooks registered.`);
-        setIsConnectModalOpen(false);
+        setSuccessMessage(`Shopify store "${normalizedDomain}" connected successfully.`);
       }
+      setIsConnectModalOpen(false);
     } catch (err) {
       if (err instanceof ApiError) {
         setConnectError(err.message);
@@ -144,55 +162,111 @@ export const StoresPage: React.FC = () => {
     }
   };
 
-  // Open Reconnect Modal
-  const handleOpenReconnectModal = (store: StoreConnection) => {
-    setStoreToReconnect(store);
-    setReconnectAccessToken("");
-    setReconnectApiSecretKey("");
-    setReconnectError(null);
-  };
-
-  // Submit Reconnect Store
-  const handleReconnectSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!storeToReconnect) return;
-
-    setReconnectLoading(true);
-    setReconnectError(null);
+  // Reconnect Store
+  const handleReconnect = async (store: StoreConnection) => {
+    setReconnectingId(store.id);
+    setError(null);
+    setSuccessMessage(null);
 
     try {
-      const payload: { accessToken?: string; apiSecretKey?: string } = {};
-      if (reconnectAccessToken.trim()) {
-        payload.accessToken = reconnectAccessToken.trim();
-      }
-      if (reconnectApiSecretKey.trim()) {
-        payload.apiSecretKey = reconnectApiSecretKey.trim();
-      }
-
-      const updated = await api.patch<StoreConnection>(
-        `/api/v1/stores/${storeToReconnect.id}/reconnect`,
-        payload
-      );
+      const updated = await api.patch<StoreConnection>(`/api/v1/stores/${store.id}/reconnect`);
 
       setStores((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
 
       if (updated.verificationWarning) {
-        setSuccessMessage(`Store reconnected with warning: ${updated.verificationWarning}`);
+        setSuccessMessage(`Store "${store.shopDomain}" reconnected with warning: ${updated.verificationWarning}`);
       } else {
-        setSuccessMessage(`Shopify store "${storeToReconnect.shopDomain}" reconnected and webhooks refreshed.`);
+        setSuccessMessage(`Shopify store "${store.shopDomain}" reconnected and webhooks refreshed.`);
       }
-
-      setStoreToReconnect(null);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setReconnectError(err.message);
-      } else if (err instanceof Error) {
-        setReconnectError(err.message);
-      } else {
-        setReconnectError("Failed to reconnect store.");
-      }
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+          ? err.message
+          : "Failed to reconnect store.";
+      setError(`Reconnect failed for "${store.shopDomain}": ${msg}`);
     } finally {
-      setReconnectLoading(false);
+      setReconnectingId(null);
+    }
+  };
+
+  // Toggle Marketing Consent
+  const handleToggleConsent = async (store: StoreConnection) => {
+    const isCurrentlyOn = store.treatShopifySmsAsWhatsappConsent ?? true;
+
+    if (isCurrentlyOn) {
+      // Turning OFF requires no confirmation
+      setUpdatingConsentId(store.id);
+      setError(null);
+      try {
+        const updated = await api.patch<StoreConnection>(
+          `/api/v1/stores/${store.id}/consent-settings`,
+          {
+            treatShopifySmsAsWhatsappConsent: false,
+          }
+        );
+        setStores((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+        setSuccessMessage(
+          `Updated consent setting for "${store.shopDomain}": Shopify SMS consent will NOT be treated as WhatsApp consent.`
+        );
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+            ? err.message
+            : "Failed to update consent settings.";
+        setError(msg);
+      } finally {
+        setUpdatingConsentId(null);
+      }
+    } else {
+      // Turning ON requires explicit merchant confirmation of checkout/sign-up wording
+      setConfirmConsentStore(store);
+      setConfirmWordingChecked(false);
+      setConfirmModalError(null);
+    }
+  };
+
+  // Confirm turning consent setting ON
+  const handleConfirmConsentEnable = async () => {
+    if (!confirmConsentStore) return;
+
+    if (!confirmWordingChecked) {
+      setConfirmModalError(
+        "You must explicitly confirm that your checkout or sign-up wording discloses WhatsApp marketing to customers."
+      );
+      return;
+    }
+
+    setUpdatingConsentId(confirmConsentStore.id);
+    setConfirmModalError(null);
+
+    try {
+      const updated = await api.patch<StoreConnection>(
+        `/api/v1/stores/${confirmConsentStore.id}/consent-settings`,
+        {
+          treatShopifySmsAsWhatsappConsent: true,
+          confirmWording: true,
+        }
+      );
+
+      setStores((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+      setSuccessMessage(
+        `Updated consent setting for "${confirmConsentStore.shopDomain}": Shopify SMS marketing consent is now treated as WhatsApp consent.`
+      );
+      setConfirmConsentStore(null);
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+          ? err.message
+          : "Failed to update consent settings.";
+      setConfirmModalError(msg);
+    } finally {
+      setUpdatingConsentId(null);
     }
   };
 
@@ -303,10 +377,10 @@ export const StoresPage: React.FC = () => {
               <ShoppingBag className="w-6 h-6" />
             </div>
             <h3 className="text-sm font-heading font-semibold text-crm-text">
-              No stores connected — connect your Shopify store to start tracking orders and abandoned carts.
+              No stores connected — connect your Shopify store to start tracking orders and abandoned checkouts.
             </h3>
             <p className="text-xs text-crm-textSecondary mt-1 max-w-md">
-              Connect your Shopify custom app using your *.myshopify.com domain and Admin API credentials to automatically sync orders and abandoned checkouts.
+              Connect your store using its myshopify.com domain to automatically sync orders and abandoned carts.
             </p>
             <button
               onClick={handleOpenConnectModal}
@@ -323,46 +397,109 @@ export const StoresPage: React.FC = () => {
           </div>
         ) : (
           <div className="divide-y divide-crm-border">
-            {filteredStores.map((store) => (
-              <div
-                key={store.id}
-                className="p-5 hover:bg-crm-subtle/30 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-              >
-                <div className="space-y-1.5 min-w-0 flex-1">
-                  <div className="flex items-center gap-2.5 flex-wrap">
-                    <span className="text-sm font-mono font-semibold text-crm-text flex items-center gap-1.5">
-                      <ShoppingBag className="w-4 h-4 text-crm-accent" />
-                      <span>{store.shopDomain}</span>
-                    </span>
-                    {renderStatusBadge(store.status)}
-                  </div>
+            {filteredStores.map((store) => {
+              const smsConsentOn = store.treatShopifySmsAsWhatsappConsent ?? true;
+              const isUpdatingThisConsent = updatingConsentId === store.id;
+              const isReconnectingThis = reconnectingId === store.id;
 
-                  <div className="flex items-center gap-4 text-[11px] font-mono text-crm-textSecondary flex-wrap">
-                    <span>Connected: {formatDate(store.createdAt)}</span>
-                  </div>
+              return (
+                <div
+                  key={store.id}
+                  className="p-5 hover:bg-crm-subtle/30 transition-colors space-y-4"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1.5 min-w-0 flex-1">
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        <span className="text-sm font-mono font-semibold text-crm-text flex items-center gap-1.5">
+                          <ShoppingBag className="w-4 h-4 text-crm-accent" />
+                          <span>{store.shopDomain}</span>
+                        </span>
+                        {renderStatusBadge(store.status)}
+                      </div>
 
-                  {store.verificationWarning && (
-                    <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center gap-2">
-                      <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
-                      <span>{store.verificationWarning}</span>
+                      <div className="flex items-center gap-4 text-[11px] font-mono text-crm-textSecondary flex-wrap">
+                        <span>Connected: {formatDate(store.createdAt)}</span>
+                      </div>
+
+                      {store.verificationWarning && (
+                        <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                          <span>{store.verificationWarning}</span>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
 
-                <div className="flex flex-col sm:items-end gap-1 flex-shrink-0">
-                  <button
-                    onClick={() => handleOpenReconnectModal(store)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-crm-surface hover:bg-crm-elevated border border-crm-border text-xs font-medium text-crm-text shadow-sm transition-colors"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5 text-crm-accent" />
-                    <span>Reconnect</span>
-                  </button>
-                  <span className="text-[10px] text-crm-textMuted">
-                    Refresh webhooks / credentials
-                  </span>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <button
+                        onClick={() => handleReconnect(store)}
+                        disabled={isReconnectingThis}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-crm-surface hover:bg-crm-elevated border border-crm-border text-xs font-medium text-crm-text shadow-sm transition-colors disabled:opacity-60"
+                      >
+                        {isReconnectingThis ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 text-crm-accent animate-spin" />
+                            <span>Reconnecting...</span>
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 text-crm-accent" />
+                            <span>Reconnect</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Marketing Consent Setting */}
+                  <div className="p-3.5 rounded-lg bg-crm-bg border border-crm-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1 pr-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-crm-text">
+                          Treat Shopify SMS marketing consent as WhatsApp consent
+                        </span>
+                        <span
+                          className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                            smsConsentOn
+                              ? "bg-crm-successBg text-crm-success border border-crm-successBorder font-semibold"
+                              : "bg-gray-100 text-gray-600 border border-gray-200"
+                          }`}
+                        >
+                          {smsConsentOn ? "ON (DEFAULT)" : "OFF"}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-crm-textSecondary leading-relaxed">
+                        When ON, customers who agreed to SMS marketing in Shopify can receive WhatsApp promotional messages, and the merchant is responsible for the wording they show customers.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {isUpdatingThisConsent && (
+                        <Loader2 className="w-3.5 h-3.5 text-crm-accent animate-spin" />
+                      )}
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={smsConsentOn}
+                        disabled={isUpdatingThisConsent}
+                        onClick={() => handleToggleConsent(store)}
+                        className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-crm-accent focus:ring-offset-1 ${
+                          smsConsentOn ? "bg-crm-accent" : "bg-crm-border"
+                        } ${isUpdatingThisConsent ? "opacity-50 cursor-not-allowed" : ""}`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                            smsConsentOn ? "translate-x-4" : "translate-x-0"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Store Health & Diagnostics Panel */}
+                  <StoreHealthPanel storeId={store.id} shopDomain={store.shopDomain} />
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -395,74 +532,24 @@ export const StoresPage: React.FC = () => {
               </div>
             )}
 
-            {connectWarning && (
-              <div className="mt-4 p-2.5 rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-                <span>{connectWarning}</span>
-              </div>
-            )}
-
             <form onSubmit={handleConnectSubmit} className="mt-4 space-y-4">
-              {/* Shop Domain */}
               <div>
                 <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  Shop Domain <span className="text-red-500">*</span>
+                  Shopify store domain <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. your-store.myshopify.com"
-                  value={shopDomain}
-                  onChange={(e) => setShopDomain(e.target.value)}
+                  placeholder="e.g. nexcrm-test or nexcrm-test.myshopify.com"
+                  value={shopDomainInput}
+                  onChange={(e) => setShopDomainInput(e.target.value)}
                   className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
                 />
-                <p className="mt-1 text-[11px] text-crm-textMuted flex items-center gap-1">
-                  <HelpCircle className="w-3 h-3 text-crm-textSecondary" />
-                  <span>Must be your primary myshopify.com domain (e.g. your-store.myshopify.com).</span>
-                </p>
-              </div>
-
-              {/* Admin API Access Token */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  Admin API Access Token <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••••••••••••••••••••••••••"
-                  value={accessToken}
-                  onChange={(e) => setAccessToken(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
-                />
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-crm-textMuted">
-                  <ShieldCheck className="w-3.5 h-3.5 text-crm-accent flex-shrink-0" />
-                  <span>Stored encrypted. Never shown again after saving.</span>
-                </div>
-              </div>
-
-              {/* API Secret Key */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  API Secret Key <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••••••••••••••••••••••••••"
-                  value={apiSecretKey}
-                  onChange={(e) => setApiSecretKey(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
-                />
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-crm-textMuted">
-                  <ShieldCheck className="w-3.5 h-3.5 text-crm-accent flex-shrink-0" />
-                  <span>Stored encrypted. Never shown again after saving.</span>
-                </div>
-              </div>
-
-              <div className="p-3 rounded-lg bg-crm-elevated/40 border border-crm-border text-xs text-crm-textSecondary">
-                <p>
-                  Connecting will automatically register webhook listeners for orders (<code className="font-mono text-crm-text">orders/create</code>, <code className="font-mono text-crm-text">orders/updated</code>) and checkouts (<code className="font-mono text-crm-text">checkouts/create</code>, <code className="font-mono text-crm-text">checkouts/update</code>).
+                <p className="mt-1.5 text-[11px] text-crm-textMuted flex items-start gap-1.5">
+                  <HelpCircle className="w-3.5 h-3.5 text-crm-textSecondary flex-shrink-0 mt-0.5" />
+                  <span>
+                    The nextCRM app must be installed on this store first. Then enter your store&apos;s .myshopify.com address.
+                  </span>
                 </p>
               </div>
 
@@ -494,116 +581,83 @@ export const StoresPage: React.FC = () => {
         </div>
       )}
 
-      {/* Reconnect Shopify Store Modal */}
-      {storeToReconnect && (
+      {/* Confirmation Modal: Treat Shopify SMS as WhatsApp Consent */}
+      {confirmConsentStore && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4 select-none">
           <div className="bg-crm-surface border border-crm-border rounded-xl shadow-lg w-full max-w-lg p-6 relative">
             <div className="flex items-center justify-between pb-4 border-b border-crm-border">
               <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-md bg-crm-accentSubtle border border-crm-accentBorder flex items-center justify-center text-crm-accent">
-                  <RefreshCw className="w-4 h-4" />
+                <div className="w-7 h-7 rounded-md bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-700">
+                  <ShieldAlert className="w-4 h-4" />
                 </div>
                 <h2 className="text-sm font-heading font-semibold text-crm-text">
-                  Reconnect Shopify Store
+                  Confirm Marketing Consent Disclosure
                 </h2>
               </div>
               <button
-                onClick={() => setStoreToReconnect(null)}
+                onClick={() => setConfirmConsentStore(null)}
                 className="text-crm-textMuted hover:text-crm-text p-1 rounded transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {reconnectError && (
+            {confirmModalError && (
               <div className="mt-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-red-700 text-xs flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-                <span>{reconnectError}</span>
+                <span>{confirmModalError}</span>
               </div>
             )}
 
-            {/* Explanatory note per prompt requirement */}
-            <div className="mt-4 p-3 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-800 space-y-1">
-              <p className="font-semibold">Reconnect &amp; Refresh Webhooks</p>
+            <div className="mt-4 space-y-3 text-xs text-crm-textSecondary leading-relaxed">
               <p>
-                Use this if your server&apos;s address has changed, or to update your Shopify credentials. Both credential fields below are optional — leave them blank to keep using your existing stored credentials.
+                You are enabling nextCRM to treat customers who opted into SMS marketing in Shopify as consented to receive WhatsApp promotional messages for store:{" "}
+                <span className="font-mono font-semibold text-crm-text">{confirmConsentStore.shopDomain}</span>.
               </p>
+              <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 space-y-1.5">
+                <p className="font-semibold text-amber-950">Merchant Compliance Responsibility</p>
+                <p>
+                  As the merchant, you are strictly responsible for ensuring that your checkout and sign-up wording clearly and conspicuously informs customers that they may receive marketing communications via WhatsApp.
+                </p>
+              </div>
+
+              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-crm-bg border border-crm-border cursor-pointer hover:bg-crm-elevated transition-colors mt-2">
+                <input
+                  type="checkbox"
+                  checked={confirmWordingChecked}
+                  onChange={(e) => setConfirmWordingChecked(e.target.checked)}
+                  className="mt-0.5 rounded border-crm-border text-crm-accent focus:ring-crm-accent"
+                />
+                <span className="text-xs font-medium text-crm-text select-none">
+                  I confirm that our store&apos;s checkout and sign-up wording explicitly informs customers they may receive marketing messages via WhatsApp.
+                </span>
+              </label>
             </div>
 
-            <form onSubmit={handleReconnectSubmit} className="mt-4 space-y-4">
-              {/* Shop Domain (Read only) */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  Shop Domain
-                </label>
-                <input
-                  type="text"
-                  disabled
-                  value={storeToReconnect.shopDomain}
-                  className="w-full px-3 py-2 bg-crm-elevated border border-crm-border rounded-md text-xs text-crm-textSecondary font-mono cursor-not-allowed select-none"
-                />
-              </div>
-
-              {/* Optional New Admin API Access Token */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  New Admin API Access Token <span className="text-crm-textMuted font-normal lowercase">(optional)</span>
-                </label>
-                <input
-                  type="password"
-                  placeholder="Leave blank to keep existing token"
-                  value={reconnectAccessToken}
-                  onChange={(e) => setReconnectAccessToken(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
-                />
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-crm-textMuted">
-                  <ShieldCheck className="w-3.5 h-3.5 text-crm-accent flex-shrink-0" />
-                  <span>Stored encrypted. Never shown again after saving.</span>
-                </div>
-              </div>
-
-              {/* Optional New API Secret Key */}
-              <div>
-                <label className="block text-[11px] font-medium text-crm-textSecondary uppercase tracking-wider mb-1">
-                  New API Secret Key <span className="text-crm-textMuted font-normal lowercase">(optional)</span>
-                </label>
-                <input
-                  type="password"
-                  placeholder="Leave blank to keep existing secret"
-                  value={reconnectApiSecretKey}
-                  onChange={(e) => setReconnectApiSecretKey(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-crm-border rounded-md text-xs text-crm-text placeholder-crm-textMuted font-mono focus:outline-none focus:border-crm-accent focus:ring-1 focus:ring-crm-accent transition-colors"
-                />
-                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-crm-textMuted">
-                  <ShieldCheck className="w-3.5 h-3.5 text-crm-accent flex-shrink-0" />
-                  <span>Stored encrypted. Never shown again after saving.</span>
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-crm-border flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setStoreToReconnect(null)}
-                  className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={reconnectLoading}
-                  className="px-4 py-1.5 rounded-md bg-crm-accent hover:bg-crm-accentHover text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-60 flex items-center gap-1.5"
-                >
-                  {reconnectLoading ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Reconnecting...</span>
-                    </>
-                  ) : (
-                    <span>Reconnect &amp; Refresh</span>
-                  )}
-                </button>
-              </div>
-            </form>
+            <div className="mt-5 pt-3 border-t border-crm-border flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmConsentStore(null)}
+                className="px-3 py-1.5 rounded-md border border-crm-border text-xs font-medium text-crm-textSecondary hover:text-crm-text hover:bg-crm-elevated transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!confirmWordingChecked || updatingConsentId === confirmConsentStore.id}
+                onClick={handleConfirmConsentEnable}
+                className="px-4 py-1.5 rounded-md bg-crm-accent hover:bg-crm-accentHover text-xs font-medium text-white transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                {updatingConsentId === confirmConsentStore.id ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Enabling...</span>
+                  </>
+                ) : (
+                  <span>Confirm &amp; Enable</span>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

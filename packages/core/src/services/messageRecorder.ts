@@ -67,7 +67,7 @@ export async function findOrCreateConversation(
  */
 export async function recordOutboundMessage(
   params: RecordOutboundMessageParams
-): Promise<void> {
+): Promise<string | null> {
   try {
     const db = forWorkspace(params.workspaceId);
     const conversationId = await findOrCreateConversation(
@@ -77,7 +77,7 @@ export async function recordOutboundMessage(
     );
 
     try {
-      await db.message.create({
+      const msg = await db.message.create({
         data: {
           conversationId,
           contactId: params.contactId,
@@ -87,12 +87,16 @@ export async function recordOutboundMessage(
           body: params.body ?? null,
         } as any,
       });
+      return msg.id;
     } catch (err: any) {
       if (err?.code === "P2002") {
         console.log(
           `[messageRecorder] Duplicate outbound message ignored (P2002 redelivery): providerMessageId=${params.providerMessageId}`
         );
-        return;
+        const existing = await db.message.findFirst({
+          where: { providerMessageId: params.providerMessageId },
+        });
+        return existing?.id ?? null;
       }
       throw err;
     }
@@ -101,6 +105,7 @@ export async function recordOutboundMessage(
       `[messageRecorder] Failed to record outbound message for providerMessageId=${params.providerMessageId}:`,
       error
     );
+    return null;
   }
 }
 

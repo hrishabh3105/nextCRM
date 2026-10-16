@@ -26,6 +26,7 @@ model Workspace {
   journeys         Journey[]
   journeyRuns      JourneyRun[]
   consentEvents    ConsentEvent[]
+  journeyStepLogs  JourneyStepLog[]
 
   @@map("workspaces")
 }
@@ -97,6 +98,7 @@ model Contact {
   carts              Cart[]
   journeyRuns        JourneyRun[]
   consentEvents      ConsentEvent[]
+  journeyStepLogs    JourneyStepLog[]
 
   @@unique([workspaceId, phone])
   @@index([workspaceId])
@@ -234,6 +236,7 @@ model Message {
   workspace    Workspace    @relation(fields: [workspaceId], references: [id])
   conversation Conversation @relation(fields: [conversationId], references: [id])
   contact      Contact      @relation(fields: [contactId], references: [id])
+  journeyStepLogs JourneyStepLog[]
 
   @@unique([workspaceId, providerMessageId])
   @@index([conversationId, createdAt])
@@ -287,6 +290,7 @@ model StoreConnection {
   treatShopifySmsAsWhatsappConsent Boolean   @default(true) @map("treat_shopify_sms_as_whatsapp_consent")
   consentAttestedAt                DateTime? @map("consent_attested_at")
   consentAttestedByUserId          String?   @map("consent_attested_by_user_id")
+  lastWebhookAt                    DateTime? @map("last_webhook_at")
   createdAt                        DateTime  @default(now()) @map("created_at")
   updatedAt                        DateTime  @updatedAt @map("updated_at")
 
@@ -297,39 +301,56 @@ model StoreConnection {
 }
 
 model Order {
-  id             String   @id @default(cuid())
-  workspaceId    String   @map("workspace_id")
-  contactId      String?  @map("contact_id")
-  shopifyOrderId String   @map("shopify_order_id")
-  status         String
+  id                String   @id @default(cuid())
+  workspaceId       String   @map("workspace_id")
+  contactId         String?  @map("contact_id")
+  shopifyOrderId    String   @map("shopify_order_id")
+  orderNumber       String?  @map("order_number")
+  checkoutToken     String?  @map("checkout_token")
+  cartToken         String?  @map("cart_token")
+  status            String
   fulfillmentStatus String?  @map("fulfillment_status")
-  totalPrice     Decimal  @db.Decimal(10, 2) @map("total_price")
-  currency       String
-  createdAt      DateTime @default(now()) @map("created_at")
+  totalPrice        Decimal  @db.Decimal(10, 2) @map("total_price")
+  currency          String
+  lineItems         Json?    @map("line_items")
+  createdAt         DateTime @default(now()) @map("created_at")
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
-  contact   Contact?  @relation(fields: [contactId], references: [id])
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
+  contact     Contact?     @relation(fields: [contactId], references: [id])
+  journeyRuns JourneyRun[]
 
   @@unique([workspaceId, shopifyOrderId])
   @@index([workspaceId])
+  @@index([workspaceId, checkoutToken])
+  @@index([workspaceId, cartToken])
   @@map("orders")
 }
 
 model Cart {
-  id             String   @id @default(cuid())
-  workspaceId    String   @map("workspace_id")
-  contactId      String?  @map("contact_id")
-  shopifyCartId  String   @map("shopify_cart_id")
-  status         String   @default("active")
-  totalPrice     Decimal  @db.Decimal(10, 2) @map("total_price")
-  lastActivityAt DateTime @map("last_activity_at")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id             String    @id @default(cuid())
+  workspaceId    String    @map("workspace_id")
+  contactId      String?   @map("contact_id")
+  shopifyCartId  String    @map("shopify_cart_id")
+  checkoutToken  String?   @map("checkout_token")
+  cartToken      String?   @map("cart_token")
+  status         String    @default("active")
+  totalPrice     Decimal   @db.Decimal(10, 2) @map("total_price")
+  currency       String?   @default("USD")
+  recoveryUrl    String?   @map("recovery_url")
+  lineItems      Json?     @map("line_items")
+  convertedAt    DateTime? @map("converted_at")
+  orderId        String?   @map("order_id")
+  lastActivityAt DateTime  @map("last_activity_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
-  contact   Contact?  @relation(fields: [contactId], references: [id])
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
+  contact     Contact?     @relation(fields: [contactId], references: [id])
+  journeyRuns JourneyRun[]
 
   @@unique([workspaceId, shopifyCartId])
   @@index([workspaceId])
+  @@index([workspaceId, checkoutToken])
+  @@index([workspaceId, cartToken])
   @@map("carts")
 }
 
@@ -346,6 +367,7 @@ model Journey {
   workspace Workspace        @relation(fields: [workspaceId], references: [id])
   versions  JourneyVersion[]
   runs      JourneyRun[]
+  stepLogs  JourneyStepLog[]
 
   @@index([workspaceId])
   // NOTE: a partial unique index (journeys_active_trigger_unique) exists
@@ -377,8 +399,11 @@ model JourneyRun {
   journeyVersionId String    @map("journey_version_id")
   contactId        String    @map("contact_id")
   triggerContextId String?   @map("trigger_context_id")
+  cartId           String?   @map("cart_id")
+  orderId          String?   @map("order_id")
   currentStepIndex Int       @default(0) @map("current_step_index")
   status           String    @default("running")
+  exitReason       String?   @map("exit_reason")
   nextStepAt       DateTime? @map("next_step_at")
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
@@ -387,15 +412,46 @@ model JourneyRun {
   journey        Journey        @relation(fields: [journeyId], references: [id])
   journeyVersion JourneyVersion @relation(fields: [journeyVersionId], references: [id])
   contact        Contact        @relation(fields: [contactId], references: [id])
+  cart           Cart?          @relation(fields: [cartId], references: [id])
+  order          Order?         @relation(fields: [orderId], references: [id])
+  stepLogs       JourneyStepLog[]
 
   @@index([workspaceId])
   @@index([status, nextStepAt])
+  @@index([workspaceId, cartId])
+  @@index([workspaceId, orderId])
   // NOTE: a partial unique index (journey_runs_active_unique) exists
   // directly in the database via a raw migration — this index is NOT
   // representable in Prisma's schema language and is intentionally
   // absent from this model definition. Do not add an @@index or
   // @@unique attempting to represent it.
   @@map("journey_runs")
+}
+
+model JourneyStepLog {
+  id           String    @id @default(cuid())
+  workspaceId  String    @map("workspace_id")
+  journeyId    String    @map("journey_id")
+  journeyRunId String    @map("journey_run_id")
+  stepIndex    Int       @map("step_index")
+  stepId       String?   @map("step_id")
+  contactId    String?   @map("contact_id")
+  stepType     String    @map("step_type")
+  outcome      String
+  reasonCode   String?   @map("reason_code")
+  detail       String?   @db.VarChar(500)
+  messageId    String?   @map("message_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  workspace  Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  journey    Journey    @relation(fields: [journeyId], references: [id], onDelete: Cascade)
+  journeyRun JourneyRun @relation(fields: [journeyRunId], references: [id], onDelete: Cascade)
+  contact    Contact?   @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  message    Message?   @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, journeyId, createdAt])
+  @@index([workspaceId, journeyRunId])
+  @@map("journey_step_logs")
 }
 
 enum ConsentStatus {
@@ -412,6 +468,7 @@ model ConsentEvent {
   previousStatus ConsentStatus? @map("previous_status")
   source         String
   evidence       Json?
+  occurredAt     DateTime?      @map("occurred_at")
   createdAt      DateTime       @default(now()) @map("created_at")
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])

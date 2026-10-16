@@ -74,7 +74,7 @@ journeysRouter.post(
     const db = forWorkspace(req.workspaceId!);
 
     if (status === "active") {
-      const validationResult = await validateJourneyStepsForActivation(db, steps);
+      const validationResult = await validateJourneyStepsForActivation(db, steps, triggerEvent);
       if (!validationResult.valid) {
         throw new ApiError(
           400,
@@ -187,7 +187,7 @@ journeysRouter.post(
       : journey.versions[0];
 
     const stepsToValidate = Array.isArray(currentVersion?.steps) ? currentVersion.steps : [];
-    const validationResult = await validateJourneyStepsForActivation(db, stepsToValidate);
+    const validationResult = await validateJourneyStepsForActivation(db, stepsToValidate, journey.triggerEvent);
     if (!validationResult.valid) {
       throw new ApiError(
         400,
@@ -243,7 +243,7 @@ journeysRouter.patch(
 
     if (steps && Array.isArray(steps)) {
       if (targetStatus === "active") {
-        const validationResult = await validateJourneyStepsForActivation(db, steps);
+        const validationResult = await validateJourneyStepsForActivation(db, steps, triggerEvent || journey.triggerEvent);
         if (!validationResult.valid) {
           throw new ApiError(
             400,
@@ -270,7 +270,7 @@ journeysRouter.patch(
         : journey.versions[0];
 
       const stepsToValidate = Array.isArray(currentVersion?.steps) ? currentVersion.steps : [];
-      const validationResult = await validateJourneyStepsForActivation(db, stepsToValidate);
+      const validationResult = await validateJourneyStepsForActivation(db, stepsToValidate, triggerEvent || journey.triggerEvent);
       if (!validationResult.valid) {
         throw new ApiError(
           400,
@@ -367,3 +367,241 @@ journeysRouter.post(
     res.status(201).json(currentRun || run);
   })
 );
+
+/**
+ * GET /:id/runs?status=&cursor=&limit=
+ * Returns paginated runs for a journey with contact name, started time, and final outcome.
+ */
+journeysRouter.get(
+  "/:id/runs",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+    const journey = await db.journey.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!journey) {
+      throw new ApiError(404, "Journey not found");
+    }
+
+    const limitParam = parseInt(req.query.limit as string, 10);
+    const limit = Math.min(Math.max(!isNaN(limitParam) ? limitParam : 25, 1), 100);
+    const cursor = (req.query.cursor as string | undefined)?.trim();
+    const status = (req.query.status as string | undefined)?.trim();
+
+    const where: any = {
+      journeyId: req.params.id,
+      workspaceId: req.workspaceId!,
+    };
+    if (status) {
+      where.status = status;
+    }
+
+    const runs = await db.journeyRun.findMany({
+      where,
+      take: limit + 1,
+      ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+      orderBy: { createdAt: "desc" },
+      include: {
+        contact: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+          },
+        },
+      },
+    });
+
+    let nextCursor: string | null = null;
+    if (runs.length > limit) {
+      runs.pop();
+      nextCursor = runs[runs.length - 1]?.id ?? null;
+    }
+
+    res.status(200).json({
+      runs: runs.map((run) => ({
+        id: run.id,
+        journeyId: run.journeyId,
+        journeyVersionId: run.journeyVersionId,
+        contactId: run.contactId,
+        contactName: run.contact?.name || null,
+        contactPhone: run.contact?.phone || null,
+        currentStepIndex: run.currentStepIndex,
+        status: run.status,
+        exitReason: run.exitReason,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+      })),
+      nextCursor,
+    });
+  })
+);
+
+/**
+ * GET /:id/runs/:runId
+ * Returns the ordered step logs for a run, including linked message delivery status.
+ */
+journeysRouter.get(
+  "/:id/runs/:runId",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+    const journey = await db.journey.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!journey) {
+      throw new ApiError(404, "Journey not found");
+    }
+
+    const run = await db.journeyRun.findFirst({
+      where: {
+        id: req.params.runId,
+        journeyId: req.params.id,
+        workspaceId: req.workspaceId!,
+      },
+      include: {
+        contact: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+          },
+        },
+      },
+    });
+
+    if (!run) {
+      throw new ApiError(404, "Journey run not found");
+    }
+
+    const stepLogs = await db.journeyStepLog.findMany({
+      where: {
+        journeyRunId: req.params.runId,
+        workspaceId: req.workspaceId!,
+      },
+      orderBy: [{ stepIndex: "asc" }, { createdAt: "asc" }],
+      include: {
+        message: {
+          select: {
+            id: true,
+            status: true,
+            direction: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    res.status(200).json({
+      run: {
+        id: run.id,
+        journeyId: run.journeyId,
+        journeyVersionId: run.journeyVersionId,
+        contactId: run.contactId,
+        contactName: run.contact?.name || null,
+        contactPhone: run.contact?.phone || null,
+        currentStepIndex: run.currentStepIndex,
+        status: run.status,
+        exitReason: run.exitReason,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+      },
+      stepLogs: stepLogs.map((log) => ({
+        id: log.id,
+        stepIndex: log.stepIndex,
+        stepId: log.stepId,
+        stepType: log.stepType,
+        outcome: log.outcome,
+        reasonCode: log.reasonCode,
+        detail: log.detail,
+        messageId: log.messageId,
+        messageStatus: log.message?.status ?? null,
+        createdAt: log.createdAt,
+      })),
+    });
+  })
+);
+
+/**
+ * GET /:id/stats?days=7
+ * Returns counts of runs started, messages sent, skipped by reason, failed, and exited as cart converted.
+ */
+journeysRouter.get(
+  "/:id/stats",
+  asyncHandler(async (req: Request, res: Response) => {
+    const db = forWorkspace(req.workspaceId!);
+    const journey = await db.journey.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!journey) {
+      throw new ApiError(404, "Journey not found");
+    }
+
+    const daysParam = parseInt(req.query.days as string, 10);
+    const days = !isNaN(daysParam) && daysParam > 0 ? daysParam : 7;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const [runsStarted, messagesSent, failedStepLogs, cartConvertedRuns, skippedGroups] =
+      await Promise.all([
+        db.journeyRun.count({
+          where: {
+            journeyId: req.params.id,
+            workspaceId: req.workspaceId!,
+            createdAt: { gte: since },
+          },
+        }),
+        db.journeyStepLog.count({
+          where: {
+            journeyId: req.params.id,
+            workspaceId: req.workspaceId!,
+            outcome: "SENT",
+            createdAt: { gte: since },
+          },
+        }),
+        db.journeyStepLog.count({
+          where: {
+            journeyId: req.params.id,
+            workspaceId: req.workspaceId!,
+            outcome: "FAILED",
+            createdAt: { gte: since },
+          },
+        }),
+        db.journeyRun.count({
+          where: {
+            journeyId: req.params.id,
+            workspaceId: req.workspaceId!,
+            exitReason: "CART_CONVERTED",
+            createdAt: { gte: since },
+          },
+        }),
+        db.journeyStepLog.groupBy({
+          by: ["reasonCode"],
+          where: {
+            journeyId: req.params.id,
+            workspaceId: req.workspaceId!,
+            outcome: "SKIPPED",
+            createdAt: { gte: since },
+          },
+          _count: { id: true },
+        }),
+      ]);
+
+    const skippedByReason: Record<string, number> = {};
+    for (const group of skippedGroups) {
+      const code = group.reasonCode || "UNKNOWN";
+      skippedByReason[code] = (skippedByReason[code] || 0) + group._count.id;
+    }
+
+    res.status(200).json({
+      days,
+      runsStarted,
+      messagesSent,
+      skippedByReason,
+      failed: failedStepLogs,
+      cartConverted: cartConvertedRuns,
+    });
+  })
+);
+

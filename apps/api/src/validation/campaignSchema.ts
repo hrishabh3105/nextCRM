@@ -19,6 +19,11 @@ export const variableMappingEntrySchema = z.discriminatedUnion("source", [
     value: z.string().min(1, "fixed value is required"),
     fallback: z.string().optional(),
   }),
+  z.object({
+    source: z.literal("trigger_field"),
+    field: z.string().min(1, "field is required"),
+    fallback: z.string().optional(),
+  }),
 ]);
 
 export type VariableMappingEntryInput = z.infer<typeof variableMappingEntrySchema>;

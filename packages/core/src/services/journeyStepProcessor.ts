@@ -1,11 +1,17 @@
 import { forWorkspace } from "../tenantScope";
 import { decryptToken } from "../tokenEncryption";
-import { sendTemplateMessage } from "./metaClient";
+import { sendTemplateMessage, TemplateButtonComponent } from "./metaClient";
 import { recordMessageCost } from "./costTracker";
 import { checkFrequencyCap, recordOutboundMessage } from "./messageRecorder";
-import { resolveTemplateVariables, VariableMapping } from "./templateVariableResolver";
+import {
+  resolveTemplateVariables,
+  VariableMapping,
+  getTemplateDynamicButton,
+  resolveButtonVariable,
+} from "./templateVariableResolver";
 import { journeyTickQueue } from "../queue";
 import { evaluateSendPermission, SendContext } from "./consentService";
+import { logJourneyStep, JOURNEY_STEP_REASON_CODES } from "./journeyStepLogger";
 
 export interface JourneyStep {
   type: "wait" | "send_message" | "condition" | "exit" | string;
@@ -64,22 +70,39 @@ async function getLatestInboundReplySince(
 export async function processJourneyStep(
   runId: string,
   workspaceId: string,
-  depth = 0
+  depth = 0,
+  dbOverride?: any
 ): Promise<void> {
+  const db = dbOverride || forWorkspace(workspaceId);
+
   // Prevent infinite loops on cyclic or malformed journey graphs
   if (depth > 25) {
     console.error(
       `[journey-step-processor] Max recursion depth exceeded for run ${runId} in workspace ${workspaceId}. Marking as failed.`
     );
-    const db = forWorkspace(workspaceId);
+    const existingRun = await db.journeyRun.findFirst({
+      where: { id: runId },
+    });
     await db.journeyRun.update({
       where: { id: runId },
       data: { status: "failed", nextStepAt: null },
     });
+    if (existingRun) {
+      await logJourneyStep({
+        workspaceId,
+        journeyId: existingRun.journeyId,
+        journeyRunId: existingRun.id,
+        stepIndex: existingRun.currentStepIndex,
+        contactId: existingRun.contactId,
+        stepType: "recursion_guard",
+        outcome: "FAILED",
+        reasonCode: JOURNEY_STEP_REASON_CODES.RECURSION_DEPTH_EXCEEDED,
+        detail: `Max recursion depth exceeded for run ${runId}`,
+        dbOverride: db,
+      });
+    }
     return;
   }
-
-  const db = forWorkspace(workspaceId);
 
   // 1. Fetch the run to inspect current step index and status
   const run = await db.journeyRun.findFirst({
@@ -132,6 +155,18 @@ export async function processJourneyStep(
     await db.journeyRun.update({
       where: { id: runId },
       data: { status: "failed", nextStepAt: null },
+    });
+    await logJourneyStep({
+      workspaceId,
+      journeyId: run.journeyId,
+      journeyRunId: run.id,
+      stepIndex: run.currentStepIndex,
+      contactId: run.contactId,
+      stepType: "unknown",
+      outcome: "FAILED",
+      reasonCode: JOURNEY_STEP_REASON_CODES.UNKNOWN_ERROR,
+      detail: `JourneyVersion ${run.journeyVersionId} not found for run ${runId}`,
+      dbOverride: db,
     });
     return;
   }
@@ -188,6 +223,19 @@ export async function processJourneyStep(
           where: { id: runId },
           data: { status: "failed", nextStepAt: null },
         });
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "FAILED",
+          reasonCode: JOURNEY_STEP_REASON_CODES.NO_PHONE,
+          detail: `Contact ${run.contactId} not found for run ${runId}`,
+          dbOverride: db,
+        });
         return;
       }
 
@@ -196,6 +244,19 @@ export async function processJourneyStep(
         await db.journeyRun.update({
           where: { id: runId },
           data: { status: "failed", nextStepAt: null },
+        });
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "FAILED",
+          reasonCode: JOURNEY_STEP_REASON_CODES.UNKNOWN_ERROR,
+          detail: `Step missing templateId for run ${runId}`,
+          dbOverride: db,
         });
         return;
       }
@@ -209,6 +270,19 @@ export async function processJourneyStep(
         await db.journeyRun.update({
           where: { id: runId },
           data: { status: "failed", nextStepAt: null },
+        });
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "FAILED",
+          reasonCode: JOURNEY_STEP_REASON_CODES.TEMPLATE_NOT_APPROVED,
+          detail: `Template ${step.templateId} not found for run ${runId}`,
+          dbOverride: db,
         });
         return;
       }
@@ -227,7 +301,55 @@ export async function processJourneyStep(
           where: { id: runId },
           data: { status: "failed", nextStepAt: null },
         });
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "FAILED",
+          reasonCode: JOURNEY_STEP_REASON_CODES.CHANNEL_NOT_CONFIGURED,
+          detail: `Channel ${channelId} missing or incomplete for run ${runId}`,
+          dbOverride: db,
+        });
         return;
+      }
+
+      // Final guard for cart_abandoned journeys right before sending: re-read the cart
+      if (run.journey?.triggerEvent === "cart_abandoned" && run.triggerContextId) {
+        const cart = await db.cart.findUnique({
+          where: { id: run.triggerContextId },
+        });
+
+        if (cart && (cart.status === "converted" || cart.convertedAt != null)) {
+          console.log(
+            `[journey-step-processor] Cart ${cart.id} is converted for run ${runId}. Skipping send_message step and exiting run with reason CART_CONVERTED.`
+          );
+          await db.journeyRun.update({
+            where: { id: runId },
+            data: {
+              status: "exited",
+              exitReason: "CART_CONVERTED",
+              nextStepAt: null,
+            },
+          });
+          await logJourneyStep({
+            workspaceId,
+            journeyId: run.journeyId,
+            journeyRunId: run.id,
+            stepIndex: run.currentStepIndex,
+            stepId: step.id,
+            contactId: run.contactId,
+            stepType: step.type,
+            outcome: "EXITED",
+            reasonCode: JOURNEY_STEP_REASON_CODES.CART_CONVERTED,
+            detail: `Cart ${cart.id} is converted for run ${runId}. Skipping send_message step and exiting run with reason CART_CONVERTED.`,
+            dbOverride: db,
+          });
+          return;
+        }
       }
 
       // Consent evaluation: MARKETING requires consent (exempt for cart_abandoned unless OPTED_OUT)
@@ -254,7 +376,23 @@ export async function processJourneyStep(
             nextStepAt: null,
           },
         });
-        return processJourneyStep(runId, workspaceId, depth + 1);
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "SKIPPED",
+          reasonCode:
+            permission.reason === "OPTED_OUT"
+              ? JOURNEY_STEP_REASON_CODES.OPTED_OUT
+              : JOURNEY_STEP_REASON_CODES.NO_CONSENT,
+          detail: `Contact ${contact.id} blocked by consent guard (${permission.reason}) in run ${runId}`,
+          dbOverride: db,
+        });
+        return processJourneyStep(runId, workspaceId, depth + 1, dbOverride);
       }
 
       const canSend = await checkFrequencyCap(db, contact.id);
@@ -270,7 +408,20 @@ export async function processJourneyStep(
             nextStepAt: null,
           },
         });
-        return processJourneyStep(runId, workspaceId, depth + 1);
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "SKIPPED",
+          reasonCode: JOURNEY_STEP_REASON_CODES.FREQUENCY_CAP,
+          detail: `Contact ${contact.id} reached frequency cap in run ${runId}`,
+          dbOverride: db,
+        });
+        return processJourneyStep(runId, workspaceId, depth + 1, dbOverride);
       }
 
       const templatePlaceholders = Array.isArray(template.positionalPlaceholders)
@@ -289,10 +440,22 @@ export async function processJourneyStep(
             ? (step.variableMapping as any)
             : {};
 
-        const resolvedResult = resolveTemplateVariables({
+        const resolvedResult = await resolveTemplateVariables({
           placeholders: templatePlaceholders,
           mapping,
           contact,
+          db,
+          workspaceId,
+          cartId:
+            run.cartId ||
+            (run.journey?.triggerEvent === "cart_abandoned"
+              ? run.triggerContextId
+              : null),
+          orderId:
+            run.orderId ||
+            (run.journey?.triggerEvent?.startsWith("order_")
+              ? run.triggerContextId
+              : null),
         });
 
         if ("error" in resolvedResult) {
@@ -307,10 +470,109 @@ export async function processJourneyStep(
               nextStepAt: null,
             },
           });
-          return processJourneyStep(runId, workspaceId, depth + 1);
+          await logJourneyStep({
+            workspaceId,
+            journeyId: run.journeyId,
+            journeyRunId: run.id,
+            stepIndex: run.currentStepIndex,
+            stepId: step.id,
+            contactId: run.contactId,
+            stepType: step.type,
+            outcome: "SKIPPED",
+            reasonCode: JOURNEY_STEP_REASON_CODES.MISSING_VARIABLE,
+            detail: resolvedResult.error,
+            dbOverride: db,
+          });
+          return processJourneyStep(runId, workspaceId, depth + 1, dbOverride);
         }
 
         variables = resolvedResult.resolved;
+      }
+
+      // Dynamic URL button resolution
+      const dynamicBtn = getTemplateDynamicButton(template);
+      let buttonComponent: TemplateButtonComponent | undefined = undefined;
+
+      if (dynamicBtn) {
+        const stepMapping = (step.variableMapping || {}) as Record<string, any>;
+        const buttonEntry =
+          stepMapping["button:url"] ||
+          stepMapping[`button:${dynamicBtn.index}`] ||
+          stepMapping["button_url"];
+
+        if (!buttonEntry) {
+          console.error(
+            `[journey-step-processor] Template '${template.providerName}' in run ${runId} has dynamic button '${dynamicBtn.text}' but no button mapping is configured. Failing step.`
+          );
+          await db.journeyRun.update({
+            where: { id: runId },
+            data: { status: "failed", nextStepAt: null },
+          });
+          await logJourneyStep({
+            workspaceId,
+            journeyId: run.journeyId,
+            journeyRunId: run.id,
+            stepIndex: run.currentStepIndex,
+            stepId: step.id,
+            contactId: run.contactId,
+            stepType: step.type,
+            outcome: "FAILED",
+            reasonCode: JOURNEY_STEP_REASON_CODES.MISSING_BUTTON_VARIABLE,
+            detail: `Template '${template.providerName}' in run ${runId} has dynamic button '${dynamicBtn.text}' but no button mapping is configured`,
+            dbOverride: db,
+          });
+          return;
+        }
+
+        const cartId =
+          run.cartId ||
+          (run.journey?.triggerEvent === "cart_abandoned"
+            ? run.triggerContextId
+            : null);
+        let cart = null;
+        if (cartId) {
+          cart = await db.cart.findFirst({ where: { id: cartId } });
+        }
+
+        const btnResolution = resolveButtonVariable({
+          buttonUrl: dynamicBtn.url,
+          buttonIndex: dynamicBtn.index,
+          buttonText: dynamicBtn.text,
+          mappingEntry: buttonEntry,
+          cart,
+          contact,
+        });
+
+        if ("error" in btnResolution) {
+          console.error(
+            `[journey-step-processor] Failed to resolve button '${dynamicBtn.text}' variable for contact ${contact.id} in run ${runId}: ${btnResolution.error}. Failing step.`
+          );
+          await db.journeyRun.update({
+            where: { id: runId },
+            data: { status: "failed", nextStepAt: null },
+          });
+          await logJourneyStep({
+            workspaceId,
+            journeyId: run.journeyId,
+            journeyRunId: run.id,
+            stepIndex: run.currentStepIndex,
+            stepId: step.id,
+            contactId: run.contactId,
+            stepType: step.type,
+            outcome: "FAILED",
+            reasonCode: JOURNEY_STEP_REASON_CODES.MISSING_BUTTON_VARIABLE,
+            detail: btnResolution.error,
+            dbOverride: db,
+          });
+          return;
+        }
+
+        buttonComponent = {
+          type: "button",
+          sub_type: "url",
+          index: String(dynamicBtn.index),
+          parameters: [{ type: "text", text: btnResolution.value }],
+        };
       }
 
       try {
@@ -322,6 +584,7 @@ export async function processJourneyStep(
           templateName: template.providerName,
           language: template.language,
           variables,
+          buttonComponent,
         });
 
         await recordMessageCost({
@@ -330,18 +593,44 @@ export async function processJourneyStep(
           category: template.category,
         });
 
-        await recordOutboundMessage({
+        const messageId = await recordOutboundMessage({
           workspaceId,
           contactId: contact.id,
           channelId: channel.id,
           providerMessageId: result.providerMessageId,
           body: template.bodyPreview,
         });
+
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "SENT",
+          messageId: messageId ?? undefined,
+          dbOverride: db,
+        });
       } catch (metaErr) {
         console.error(`[journey-step-processor] Meta send error in run ${runId}:`, metaErr);
         await db.journeyRun.update({
           where: { id: runId },
           data: { status: "failed", nextStepAt: null },
+        });
+        await logJourneyStep({
+          workspaceId,
+          journeyId: run.journeyId,
+          journeyRunId: run.id,
+          stepIndex: run.currentStepIndex,
+          stepId: step.id,
+          contactId: run.contactId,
+          stepType: step.type,
+          outcome: "FAILED",
+          reasonCode: JOURNEY_STEP_REASON_CODES.META_ERROR,
+          detail: metaErr,
+          dbOverride: db,
         });
         return;
       }
@@ -357,7 +646,7 @@ export async function processJourneyStep(
       });
 
       // Recursively continue immediately
-      return processJourneyStep(runId, workspaceId, depth + 1);
+      return processJourneyStep(runId, workspaceId, depth + 1, dbOverride);
     }
 
     case "condition": {
@@ -396,6 +685,19 @@ export async function processJourneyStep(
             where: { id: runId },
             data: { status: "exited", nextStepAt: null },
           });
+          await logJourneyStep({
+            workspaceId,
+            journeyId: run.journeyId,
+            journeyRunId: run.id,
+            stepIndex: run.currentStepIndex,
+            stepId: step.id,
+            contactId: run.contactId,
+            stepType: step.type,
+            outcome: "EXITED",
+            reasonCode: JOURNEY_STEP_REASON_CODES.CONDITION_EXIT,
+            detail: `Condition '${check}' met (true), branching to exit`,
+            dbOverride: db,
+          });
           return;
         }
 
@@ -413,12 +715,25 @@ export async function processJourneyStep(
           },
         });
 
-        return processJourneyStep(runId, workspaceId, depth + 1);
+        return processJourneyStep(runId, workspaceId, depth + 1, dbOverride);
       } else {
         if (step.onFalse === "exit") {
           await db.journeyRun.update({
             where: { id: runId },
             data: { status: "exited", nextStepAt: null },
+          });
+          await logJourneyStep({
+            workspaceId,
+            journeyId: run.journeyId,
+            journeyRunId: run.id,
+            stepIndex: run.currentStepIndex,
+            stepId: step.id,
+            contactId: run.contactId,
+            stepType: step.type,
+            outcome: "EXITED",
+            reasonCode: JOURNEY_STEP_REASON_CODES.CONDITION_EXIT,
+            detail: `Condition '${check}' not met (false), branching to exit`,
+            dbOverride: db,
           });
           return;
         }
@@ -437,7 +752,7 @@ export async function processJourneyStep(
           },
         });
 
-        return processJourneyStep(runId, workspaceId, depth + 1);
+        return processJourneyStep(runId, workspaceId, depth + 1, dbOverride);
       }
     }
 
@@ -447,8 +762,22 @@ export async function processJourneyStep(
         where: { id: runId },
         data: {
           status,
+          exitReason: step.reason ?? null,
           nextStepAt: null,
         },
+      });
+      await logJourneyStep({
+        workspaceId,
+        journeyId: run.journeyId,
+        journeyRunId: run.id,
+        stepIndex: run.currentStepIndex,
+        stepId: step.id,
+        contactId: run.contactId,
+        stepType: step.type,
+        outcome: "EXITED",
+        reasonCode: step.reason ? JOURNEY_STEP_REASON_CODES.STEP_EXIT : null,
+        detail: step.reason || "Journey reached exit step",
+        dbOverride: db,
       });
       return;
     }
@@ -460,6 +789,19 @@ export async function processJourneyStep(
       await db.journeyRun.update({
         where: { id: runId },
         data: { status: "failed", nextStepAt: null },
+      });
+      await logJourneyStep({
+        workspaceId,
+        journeyId: run.journeyId,
+        journeyRunId: run.id,
+        stepIndex: run.currentStepIndex,
+        stepId: step.id,
+        contactId: run.contactId,
+        stepType: String(step.type),
+        outcome: "FAILED",
+        reasonCode: JOURNEY_STEP_REASON_CODES.UNKNOWN_STEP_TYPE,
+        detail: `Unknown step type '${step.type}' at index ${run.currentStepIndex}`,
+        dbOverride: db,
       });
       return;
     }

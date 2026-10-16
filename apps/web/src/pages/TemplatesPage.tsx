@@ -31,6 +31,7 @@ export interface TemplateButton {
   text: string;
   url?: string;
   phoneNumber?: string;
+  sample?: string;
 }
 
 export interface Template {
@@ -72,6 +73,7 @@ interface ButtonEditorRow {
   text: string;
   url: string;
   phoneNumber: string;
+  sample?: string;
 }
 
 function formatDate(dateStr: string): string {
@@ -367,13 +369,40 @@ export const TemplatesPage: React.FC = () => {
           setCreateError(`Button #${i + 1} URL is required.`);
           return;
         }
-        try {
-          new URL(url);
-        } catch {
-          setCreateError(`Button #${i + 1} URL must be a valid URL (including https://).`);
-          return;
+        if (url.includes("{{")) {
+          if (!url.startsWith("https://")) {
+            setCreateError(`Button #${i + 1} URL must start with https://.`);
+            return;
+          }
+          const openingBraces = url.match(/\{\{/g) ?? [];
+          const allPlaceholders = url.match(/\{\{[^}]*\}\}/g) ?? [];
+          if (openingBraces.length > 1 || allPlaceholders.length > 1) {
+            setCreateError(`Button #${i + 1} URL can only contain a single placeholder {{1}}.`);
+            return;
+          }
+          if (!url.includes("{{1}}")) {
+            setCreateError(`Button #${i + 1} URL can only use {{1}} as its dynamic placeholder.`);
+            return;
+          }
+          if (!url.endsWith("{{1}}")) {
+            setCreateError(`Button #${i + 1} dynamic placeholder {{1}} must be at the very end of the URL.`);
+            return;
+          }
+          const sample = btn.sample?.trim();
+          if (!sample) {
+            setCreateError(`Button #${i + 1} sample value is required when the URL contains {{1}}.`);
+            return;
+          }
+          formattedButtons.push({ type: "URL", text, url, sample });
+        } else {
+          try {
+            new URL(url);
+          } catch {
+            setCreateError(`Button #${i + 1} URL must be a valid URL (including https://).`);
+            return;
+          }
+          formattedButtons.push({ type: "URL", text, url });
         }
-        formattedButtons.push({ type: "URL", text, url });
       } else if (btn.type === "PHONE_NUMBER") {
         const phone = btn.phoneNumber.trim();
         if (!phone) {
@@ -1242,7 +1271,7 @@ export const TemplatesPage: React.FC = () => {
                         if (buttons.length < 3) {
                           setButtons((prev) => [
                             ...prev,
-                            { type: "QUICK_REPLY", text: "", url: "", phoneNumber: "" },
+                            { type: "QUICK_REPLY", text: "", url: "", phoneNumber: "", sample: "" },
                           ]);
                         }
                       }}
@@ -1330,23 +1359,64 @@ export const TemplatesPage: React.FC = () => {
                           </div>
 
                           {btn.type === "URL" && (
-                            <div>
-                              <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider mb-0.5">
-                                Target Web URL <span className="text-red-500">*</span>
-                              </label>
-                              <input
-                                type="url"
-                                required
-                                placeholder="https://example.com/tracking"
-                                value={btn.url}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  setButtons((prev) =>
-                                    prev.map((b, i) => (i === index ? { ...b, url: val } : b))
-                                  );
-                                }}
-                                className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
-                              />
+                            <div className="space-y-2">
+                              <div>
+                                <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider mb-0.5">
+                                  Target Web URL <span className="text-red-500">*</span>
+                                </label>
+                                <input
+                                  type="url"
+                                  required
+                                  placeholder="https://example.com/tracking"
+                                  value={btn.url}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setButtons((prev) =>
+                                      prev.map((b, i) => (i === index ? { ...b, url: val } : b))
+                                    );
+                                  }}
+                                  className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                                />
+                                {btn.url.includes("{{") && !btn.url.endsWith("{{1}}") && (
+                                  <p className="text-[11px] text-red-500 font-mono mt-1">
+                                    Placeholder {"{{1}}"} must be placed at the very end of the URL.
+                                  </p>
+                                )}
+                                {btn.url.includes("{{") && !btn.url.startsWith("https://") && (
+                                  <p className="text-[11px] text-red-500 font-mono mt-1">
+                                    Dynamic URL must start with https://
+                                  </p>
+                                )}
+                                {btn.url.includes("{{") && (btn.url.match(/\{\{/g) || []).length > 1 && (
+                                  <p className="text-[11px] text-red-500 font-mono mt-1">
+                                    URL can only contain a single placeholder {"{{1}}"}.
+                                  </p>
+                                )}
+                              </div>
+
+                              {btn.url.includes("{{1}}") && (
+                                <div>
+                                  <label className="block text-[10px] font-mono text-crm-textSecondary uppercase tracking-wider mb-0.5">
+                                    Sample value <span className="text-red-500">*</span>
+                                  </label>
+                                  <input
+                                    type="text"
+                                    required
+                                    placeholder="12345/checkouts/abc123/recover?key=xyz"
+                                    value={btn.sample || ""}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setButtons((prev) =>
+                                        prev.map((b, i) => (i === index ? { ...b, sample: val } : b))
+                                      );
+                                    }}
+                                    className="w-full px-2.5 py-1.5 bg-white border border-crm-border rounded-md text-xs font-mono text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                                  />
+                                  <p className="text-[11px] text-crm-textMuted mt-1">
+                                    Example of what replaces {"{{1}}"}, such as 12345/checkouts/abc123/recover?key=xyz. Meta uses it to review the template.
+                                  </p>
+                                </div>
+                              )}
                             </div>
                           )}
 

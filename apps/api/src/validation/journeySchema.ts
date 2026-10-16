@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { variableMappingSchema, variableMappingEntrySchema } from "./campaignSchema";
+import {
+  ALL_TRIGGER_FIELDS,
+  CART_TRIGGER_FIELDS,
+  ORDER_TRIGGER_FIELDS,
+  getTemplateDynamicButton,
+  isButtonVariableKey,
+} from "@nextcrm/core";
 
 export const journeyStatusSchema = z.enum(["active", "paused", "draft"]);
 
@@ -37,10 +44,12 @@ export interface StepValidationResult {
  * a journey can be ACTIVATED.
  *
  * Checks all send_message steps against the database templates.
+ * Enforces that trigger_field sources match the journey's triggerEvent.
  */
 export async function validateJourneyStepsForActivation(
   db: any,
-  steps: any[]
+  steps: any[],
+  triggerEvent?: string
 ): Promise<StepValidationResult> {
   const errors: string[] = [];
 
@@ -85,33 +94,120 @@ export async function validateJourneyStepsForActivation(
             .map((p) => `'{{${p}}}'`)
             .join(", ")}`
         );
-        continue;
-      }
+      } else {
+        const missing: string[] = [];
+        for (const placeholder of uniquePlaceholders) {
+          const entry = mapping[placeholder];
+          if (!entry) {
+            missing.push(placeholder);
+            continue;
+          }
 
-      const missing: string[] = [];
-      for (const placeholder of uniquePlaceholders) {
-        const entry = mapping[placeholder];
-        if (!entry) {
-          missing.push(placeholder);
-          continue;
+          const parseResult = variableMappingEntrySchema.safeParse(entry);
+          if (!parseResult.success) {
+            errors.push(
+              `Invalid mapping for '{{${placeholder}}}' in Step ${stepNum}: ${parseResult.error.issues
+                .map((iss) => iss.message)
+                .join(", ")}`
+            );
+            continue;
+          }
+
+          // Additional validation for trigger_field entries
+          if (entry.source === "trigger_field") {
+            const field = entry.field;
+            if (!field || !(ALL_TRIGGER_FIELDS as readonly string[]).includes(field)) {
+              errors.push(
+                `Unknown trigger_field '${field}' for '{{${placeholder}}}' in Step ${stepNum}. Allowed fields: ${ALL_TRIGGER_FIELDS.join(", ")}`
+              );
+            } else if (triggerEvent) {
+              const isCartTrigger = triggerEvent === "cart_abandoned";
+              const isOrderTrigger = [
+                "order_placed_cod",
+                "order_status_changed",
+                "order_delivered",
+              ].includes(triggerEvent);
+
+              if (field.startsWith("cart.") && !isCartTrigger) {
+                errors.push(
+                  `Trigger field '${field}' for placeholder '{{${placeholder}}}' in Step ${stepNum} is only allowed for cart abandonment journeys, but journey trigger is '${triggerEvent}'`
+                );
+              } else if (field.startsWith("order.") && !isOrderTrigger) {
+                errors.push(
+                  `Trigger field '${field}' for placeholder '{{${placeholder}}}' in Step ${stepNum} is only allowed for order journeys, but journey trigger is '${triggerEvent}'`
+                );
+              }
+            }
+          }
         }
 
-        const parseResult = variableMappingEntrySchema.safeParse(entry);
-        if (!parseResult.success) {
+        if (missing.length > 0) {
           errors.push(
-            `Invalid mapping for '{{${placeholder}}}' in Step ${stepNum}: ${parseResult.error.issues
-              .map((iss) => iss.message)
+            `Template '${template.providerName}' in Step ${stepNum} is missing variable mapping for placeholder(s): ${missing
+              .map((p) => `'{{${p}}}'`)
               .join(", ")}`
           );
         }
       }
+    }
 
-      if (missing.length > 0) {
+    // Dynamic URL button validation
+    const dynamicButton = getTemplateDynamicButton(template);
+    if (dynamicButton) {
+      const mapping = step.variableMapping;
+      let buttonEntry = null;
+      if (mapping && typeof mapping === "object" && !Array.isArray(mapping)) {
+        buttonEntry =
+          mapping["button:url"] ||
+          mapping[`button:${dynamicButton.index}`] ||
+          mapping["button_url"];
+        if (!buttonEntry) {
+          for (const [k, v] of Object.entries(mapping)) {
+            if (isButtonVariableKey(k) && v) {
+              buttonEntry = v;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!buttonEntry) {
         errors.push(
-          `Template '${template.providerName}' in Step ${stepNum} is missing variable mapping for placeholder(s): ${missing
-            .map((p) => `'{{${p}}}'`)
-            .join(", ")}`
+          `Template '${template.providerName}' in Step ${stepNum} has a dynamic URL button ('${dynamicButton.text}') but is missing a button variable mapping.`
         );
+      } else {
+        const parseResult = variableMappingEntrySchema.safeParse(buttonEntry);
+        if (!parseResult.success) {
+          errors.push(
+            `Invalid button variable mapping in Step ${stepNum}: ${parseResult.error.issues
+              .map((iss) => iss.message)
+              .join(", ")}`
+          );
+        } else if (buttonEntry.source === "trigger_field") {
+          const field = buttonEntry.field;
+          if (!field || !(ALL_TRIGGER_FIELDS as readonly string[]).includes(field)) {
+            errors.push(
+              `Unknown trigger_field '${field}' for button in Step ${stepNum}. Allowed fields: ${ALL_TRIGGER_FIELDS.join(", ")}`
+            );
+          } else if (triggerEvent) {
+            const isCartTrigger = triggerEvent === "cart_abandoned";
+            const isOrderTrigger = [
+              "order_placed_cod",
+              "order_status_changed",
+              "order_delivered",
+            ].includes(triggerEvent);
+
+            if (field.startsWith("cart.") && !isCartTrigger) {
+              errors.push(
+                `Trigger field '${field}' for button in Step ${stepNum} is only allowed for cart abandonment journeys, but journey trigger is '${triggerEvent}'`
+              );
+            } else if (field.startsWith("order.") && !isOrderTrigger) {
+              errors.push(
+                `Trigger field '${field}' for button in Step ${stepNum} is only allowed for order journeys, but journey trigger is '${triggerEvent}'`
+              );
+            }
+          }
+        }
       }
     }
   }

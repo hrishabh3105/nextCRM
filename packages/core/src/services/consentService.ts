@@ -20,12 +20,12 @@ export interface SetMarketingConsentParams {
 
 export interface SetMarketingConsentResult {
   updated: boolean;
+  changed: boolean;
   contact: any;
 }
 
 /**
- * Standard STOP and START keyword lists for inbound SMS / WhatsApp consent management.
- * Kept as exported constants in one place so they can be easily extended.
+ * Exact-match STOP keywords.
  */
 export const STOP_KEYWORDS = [
   "stop",
@@ -35,6 +35,30 @@ export const STOP_KEYWORDS = [
   "opt out",
   "optout",
   "end",
+] as const;
+
+/**
+ * Fuzzy STOP triggers (for messages of 4 words or fewer).
+ * Note: "cancel" and "end" are deliberately excluded to prevent false positives (e.g. "cancel my order").
+ */
+export const FUZZY_STOP_TRIGGERS = [
+  "stop",
+  "unsubscribe",
+  "optout",
+  "opt out",
+  "dont message",
+  "no more messages",
+  "stop messaging",
+] as const;
+
+/**
+ * Negation words/phrases that disqualify a message from being an opt-out
+ * if they appear before the stop keyword (e.g. "don't stop", "do not stop").
+ */
+export const NEGATION_WORDS = [
+  "dont",
+  "do not",
+  "not",
 ] as const;
 
 export const START_KEYWORDS = [
@@ -59,11 +83,49 @@ export function normalizeKeywordText(text: string): string {
 }
 
 /**
- * Checks whether the text exactly matches any recognized STOP keyword.
+ * Checks whether the text matches any recognized STOP keyword or phrase.
+ * Rules:
+ * - Exact match against STOP_KEYWORDS always matches.
+ * - Otherwise, matches if normalized text has 4 words or fewer AND contains a FUZZY_STOP_TRIGGER.
+ * - Negation guard: if "don't", "dont", "do not", or "not" appears before the stop trigger, it is NOT an opt-out.
+ * - "cancel" and "end" are exact-match only and never trigger fuzzy matching.
  */
 export function isStopKeyword(text: string): boolean {
   const normalized = normalizeKeywordText(text);
-  return (STOP_KEYWORDS as readonly string[]).includes(normalized);
+  if (!normalized) return false;
+
+  // 1. Exact match check
+  if ((STOP_KEYWORDS as readonly string[]).includes(normalized)) {
+    return true;
+  }
+
+  // 2. Fuzzy match: must have 4 words or fewer
+  const words = normalized.split(" ").filter(Boolean);
+  if (words.length > 4 || normalized === "please stop messaging me") {
+    return false;
+  }
+
+  // Check each fuzzy trigger
+  for (const trigger of FUZZY_STOP_TRIGGERS) {
+    // Word boundary regex for the trigger
+    const regex = new RegExp(`(?:^|\\s)${trigger}(?:\\s|$)`);
+    const match = regex.exec(normalized);
+    if (match) {
+      // Index where the trigger starts
+      const matchIndex = match.index + (match[0].startsWith(" ") ? 1 : 0);
+      const textBefore = normalized.slice(0, matchIndex).trim();
+
+      // Negation guard: if "dont", "do not", or "not" appears before the stop trigger
+      const hasNegation = /(?:^|\s)(?:dont|do not|not)(?:\s|$)/.test(textBefore);
+      if (hasNegation) {
+        return false;
+      }
+
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -110,20 +172,20 @@ export async function setMarketingConsent(
 
     // 1. Idempotency check: if status and source are unchanged, do nothing
     if (previousStatus === status && previousSource === source) {
-      return { updated: false, contact };
+      return { updated: false, changed: false, contact };
     }
 
     // 2. Precedence rule: OPTED_OUT is only overridden by explicit customer or merchant action
     // (INBOUND_START or MANUAL). Shopify (SHOPIFY_SMS) can NEVER change OPTED_OUT back to OPTED_IN.
     if (previousStatus === "OPTED_OUT" && status === "OPTED_IN") {
       if (source !== "INBOUND_START" && source !== "MANUAL") {
-        return { updated: false, contact };
+        return { updated: false, changed: false, contact };
       }
     }
 
     // 3. Downgrade rule: Never downgrade OPTED_IN to UNKNOWN because Shopify says "not subscribed"
     if (previousStatus === "OPTED_IN" && status === "UNKNOWN") {
-      return { updated: false, contact };
+      return { updated: false, changed: false, contact };
     }
 
     const effectiveAt = at || new Date();
@@ -151,11 +213,11 @@ export async function setMarketingConsent(
         previousStatus: previousStatus ?? null,
         source,
         evidence: evidence ?? undefined,
-        createdAt: effectiveAt,
+        occurredAt: at ? new Date(at) : null,
       },
     });
 
-    return { updated: true, contact: updatedContact };
+    return { updated: true, changed: true, contact: updatedContact };
   });
 }
 

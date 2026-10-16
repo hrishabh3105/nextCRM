@@ -42,11 +42,70 @@ export function extractPositionalPlaceholders(body: string): string[] {
  * total is a deliberately conservative, safe default for this version,
  * not a hard Meta rule we've independently verified.
  */
-export const templateButtonSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("QUICK_REPLY"), text: z.string().min(1).max(25) }),
-  z.object({ type: z.literal("URL"), text: z.string().min(1).max(25), url: z.string().url() }),
-  z.object({ type: z.literal("PHONE_NUMBER"), text: z.string().min(1).max(25), phoneNumber: z.string().min(1) }),
-]);
+export const templateButtonSchema = z
+  .discriminatedUnion("type", [
+    z.object({ type: z.literal("QUICK_REPLY"), text: z.string().min(1).max(25) }),
+    z.object({
+      type: z.literal("URL"),
+      text: z.string().min(1).max(25),
+      url: z.string().url(),
+      sample: z.string().optional(),
+      example: z.union([z.string(), z.array(z.string())]).optional(),
+    }),
+    z.object({ type: z.literal("PHONE_NUMBER"), text: z.string().min(1).max(25), phoneNumber: z.string().min(1) }),
+  ])
+  .superRefine((btn, ctx) => {
+    if (btn.type === "URL") {
+      const url = btn.url;
+      if (url.includes("{{")) {
+        if (!url.startsWith("https://")) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Dynamic URL must start with https://",
+            path: ["url"],
+          });
+        }
+
+        const openingBraces = url.match(/\{\{/g) ?? [];
+        const allPlaceholders = url.match(/\{\{[^}]*\}\}/g) ?? [];
+        if (openingBraces.length > 1 || allPlaceholders.length > 1) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "URL can only contain a single placeholder {{1}}",
+            path: ["url"],
+          });
+        } else if (!url.includes("{{1}}")) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "URL can only use {{1}} as its dynamic placeholder",
+            path: ["url"],
+          });
+        } else if (!url.endsWith("{{1}}")) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Placeholder {{1}} must be at the very end of the URL",
+            path: ["url"],
+          });
+        }
+
+        const rawSample =
+          btn.sample ??
+          (typeof (btn as any).example === "string"
+            ? (btn as any).example
+            : Array.isArray((btn as any).example) && (btn as any).example.length > 0
+            ? (btn as any).example[0]
+            : undefined);
+
+        if (!rawSample || typeof rawSample !== "string" || rawSample.trim().length === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Sample value is required for URL button with dynamic placeholder",
+            path: ["sample"],
+          });
+        }
+      }
+    }
+  });
 
 export type TemplateButtonInput = z.infer<typeof templateButtonSchema>;
 

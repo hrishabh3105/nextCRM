@@ -237,7 +237,7 @@ export const sendMessageWorker = new Worker<SendMessageJobData>(
           ? (campaign.variableMapping as any)
           : {};
 
-      const resolutionResult = resolveTemplateVariables({
+      const resolutionResult = await resolveTemplateVariables({
         placeholders: templatePlaceholders,
         mapping,
         contact,

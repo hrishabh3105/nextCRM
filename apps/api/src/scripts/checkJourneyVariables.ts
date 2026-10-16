@@ -19,7 +19,7 @@ function createMockDb(templates: Record<string, any>) {
   };
 }
 
-async function runTests() {
+export async function runJourneyVariableTests() {
   console.log("=== Running Journey Template Variable Mapping Verification Tests ===\n");
   let passed = 0;
   let failed = 0;
@@ -339,12 +339,14 @@ async function runTests() {
   console.log(`Verification Complete: ${passed} Passed, ${failed} Failed`);
   console.log(`========================================\n`);
 
-  if (failed > 0) {
-    process.exit(1);
-  }
+  return { passed, failed };
 }
 
-runTests().catch((err) => {
-  console.error("Test execution failed:", err);
-  process.exit(1);
-});
+if (require.main === module || process.argv[1]?.includes("checkJourneyVariables")) {
+  runJourneyVariableTests().then((res) => {
+    process.exit(res.failed > 0 ? 1 : 0);
+  }).catch((err) => {
+    console.error("Test execution failed:", err);
+    process.exit(1);
+  });
+}

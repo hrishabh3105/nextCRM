@@ -8,8 +8,8 @@
  */
 
 export type VariableMappingEntry = {
-  source: "contact_field" | "contact_attribute" | "fixed";
-  field?: "name" | "email" | "phone";
+  source: "contact_field" | "contact_attribute" | "fixed" | "trigger_field";
+  field?: string;
   key?: string;
   value?: string;
   fallback?: string;
@@ -285,14 +285,22 @@ export function flattenToEngineSteps(friendlySteps: FriendlyStep[]): any[] {
   return output;
 }
 
+export const BUTTON_VARIABLE_KEY = "button:url";
+
+export function isButtonVariableKey(key: string): boolean {
+  return key === "button:url" || key.startsWith("button:") || key === "button_url";
+}
+
 /**
  * Reconciles variable mappings when the selected template changes:
  * drops mapping keys that no longer exist in the new template placeholders,
- * and preserves matching ones.
+ * preserves matching ones, and preserves dynamic button mappings if hasDynamicButton is true
+ * (or not explicitly false).
  */
 export function reconcileVariableMapping(
   existingMapping: Record<string, VariableMappingEntry> | undefined,
-  newPlaceholders: string[]
+  newPlaceholders: string[],
+  hasDynamicButton?: boolean
 ): Record<string, VariableMappingEntry> {
   const result: Record<string, VariableMappingEntry> = {};
   if (!existingMapping || typeof existingMapping !== "object") return result;
@@ -300,6 +308,15 @@ export function reconcileVariableMapping(
   for (const placeholder of newPlaceholders) {
     if (existingMapping[placeholder]) {
       result[placeholder] = existingMapping[placeholder];
+    }
+  }
+
+  // Preserve button variable mapping unless template explicitly has no dynamic button
+  if (hasDynamicButton !== false) {
+    for (const [key, entry] of Object.entries(existingMapping)) {
+      if (isButtonVariableKey(key) && entry) {
+        result[key] = entry;
+      }
     }
   }
 

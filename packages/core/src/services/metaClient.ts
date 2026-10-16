@@ -37,7 +37,13 @@ function handleMetaError(data: any): never {
 
 export type MetaTemplateButtonParam =
   | { type: "QUICK_REPLY"; text: string }
-  | { type: "URL"; text: string; url: string }
+  | {
+      type: "URL";
+      text: string;
+      url: string;
+      sample?: string;
+      example?: string | string[];
+    }
   | { type: "PHONE_NUMBER"; text: string; phoneNumber: string };
 
 /**
@@ -210,7 +216,18 @@ export async function submitTemplate(params: {
           return { type: "QUICK_REPLY", text: b.text };
         }
         if (b.type === "URL") {
-          return { type: "URL", text: b.text, url: b.url };
+          const urlBtn: Record<string, any> = { type: "URL", text: b.text, url: b.url };
+          const rawSample =
+            b.sample ??
+            (typeof b.example === "string"
+              ? b.example
+              : Array.isArray(b.example) && b.example.length > 0
+              ? b.example[0]
+              : undefined);
+          if (rawSample && typeof rawSample === "string" && rawSample.trim().length > 0) {
+            urlBtn.example = [rawSample.trim()];
+          }
+          return urlBtn;
         }
         if (b.type === "PHONE_NUMBER") {
           return { type: "PHONE_NUMBER", text: b.text, phone_number: b.phoneNumber };
@@ -314,6 +331,58 @@ export async function getTemplateStatus(params: {
   };
 }
 
+export interface TemplateButtonComponent {
+  type: "button";
+  sub_type: "url";
+  index: string;
+  parameters: Array<{ type: "text"; text: string }>;
+}
+
+/**
+ * Builds the WhatsApp template message request payload.
+ * When buttonComponent is provided, it is appended to the components array alongside
+ * the existing body component.
+ * Templates without a dynamic button omit buttonComponent, producing the exact same
+ * payload as before.
+ */
+export function buildTemplateMessagePayload(params: {
+  to: string;
+  templateName: string;
+  language: string;
+  variables?: string[];
+  buttonComponent?: TemplateButtonComponent | null;
+}) {
+  const components: any[] = [];
+
+  if (params.variables && params.variables.length > 0) {
+    components.push({
+      type: "body",
+      parameters: params.variables.map((variable) => ({
+        type: "text",
+        variable: undefined,
+        text: variable,
+      })),
+    });
+  }
+
+  if (params.buttonComponent) {
+    components.push(params.buttonComponent);
+  }
+
+  return {
+    messaging_product: "whatsapp",
+    to: params.to,
+    type: "template",
+    template: {
+      name: params.templateName,
+      language: {
+        code: params.language,
+      },
+      components,
+    },
+  };
+}
+
 /**
  * Sends a WhatsApp template message to a recipient.
  * POST https://graph.facebook.com/v20.0/{phoneNumberId}/messages
@@ -325,22 +394,17 @@ export async function sendTemplateMessage(params: {
   templateName: string;
   language: string;
   variables: string[];
+  buttonComponent?: TemplateButtonComponent | null;
 }): Promise<{ providerMessageId: string }> {
-  const { accessToken, phoneNumberId, to, templateName, language, variables } = params;
+  const { accessToken, phoneNumberId, to, templateName, language, variables, buttonComponent } = params;
 
-  const components =
-    variables.length > 0
-      ? [
-          {
-            type: "body",
-            parameters: variables.map((variable) => ({
-              type: "text",
-              variable: undefined,
-              text: variable,
-            })),
-          },
-        ]
-      : [];
+  const payload = buildTemplateMessagePayload({
+    to,
+    templateName,
+    language,
+    variables,
+    buttonComponent,
+  });
 
   const response = await fetch(`${META_GRAPH_BASE_URL}/${phoneNumberId}/messages`, {
     method: "POST",
@@ -348,18 +412,7 @@ export async function sendTemplateMessage(params: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to,
-      type: "template",
-      template: {
-        name: templateName,
-        language: {
-          code: language,
-        },
-        components,
-      },
-    }),
+    body: JSON.stringify(payload),
   });
 
   const data = (await response.json().catch(() => ({}))) as any;
@@ -447,5 +500,95 @@ export async function verifyPhoneNumber(params: {
   } catch {
     return false;
   }
+}
+
+/**
+ * Builds an interactive cta_url message payload for WhatsApp.
+ */
+export function buildInteractiveCtaPayload(params: {
+  to: string;
+  bodyText: string;
+  buttonText: string;
+  url: string;
+  headerText?: string;
+  footerText?: string;
+}) {
+  const interactive: Record<string, any> = {
+    type: "cta_url",
+    body: {
+      text: params.bodyText,
+    },
+    action: {
+      name: "cta_url",
+      parameters: {
+        display_text: params.buttonText,
+        url: params.url,
+      },
+    },
+  };
+
+  if (params.headerText) {
+    interactive.header = {
+      type: "text",
+      text: params.headerText,
+    };
+  }
+
+  if (params.footerText) {
+    interactive.footer = {
+      text: params.footerText,
+    };
+  }
+
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: params.to,
+    type: "interactive",
+    interactive,
+  };
+}
+
+/**
+ * Sends a free-form interactive cta_url message to a recipient within an open 24-hour window.
+ * POST https://graph.facebook.com/v20.0/{phoneNumberId}/messages
+ */
+export async function sendInteractiveCtaMessage(params: {
+  accessToken: string;
+  phoneNumberId: string;
+  to: string;
+  bodyText: string;
+  buttonText: string;
+  url: string;
+  headerText?: string;
+  footerText?: string;
+}): Promise<{ providerMessageId: string }> {
+  const { accessToken, phoneNumberId, ...payloadParams } = params;
+  const payload = buildInteractiveCtaPayload(payloadParams);
+
+  const response = await fetch(`${META_GRAPH_BASE_URL}/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = (await response.json().catch(() => ({}))) as any;
+
+  if (!response.ok) {
+    handleMetaError(data);
+  }
+
+  const providerMessageId = data?.messages?.[0]?.id || data?.id;
+
+  if (!providerMessageId) {
+    throw new ApiError(502, "Meta response missing message ID", data);
+  }
+
+  return {
+    providerMessageId,
+  };
 }
 

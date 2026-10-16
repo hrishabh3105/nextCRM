@@ -23,7 +23,12 @@ import { normalizePhoneE164 } from "../utils/phone";
  * 2. Once `channel.workspaceId` is resolved, EVERY subsequent database operation
  *    (Contact, Conversation, Message) is strictly scoped using `forWorkspace(channel.workspaceId)`.
  */
-export async function handleInboundWebhookPayload(payload: any): Promise<void> {
+export async function handleInboundWebhookPayload(
+  payload: any,
+  dbOverride?: any,
+  channelOverride?: any,
+  sendMessageOverride?: (params: any) => Promise<{ providerMessageId: string }>
+): Promise<void> {
   const entries = payload?.entry ?? [];
 
   for (const entry of entries) {
@@ -54,9 +59,9 @@ export async function handleInboundWebhookPayload(payload: any): Promise<void> {
       // This is the one legitimate unscoped query in this codebase because
       // finding which workspace an event belongs to is the sole purpose here.
       // -----------------------------------------------------------------------
-      const channel = await prisma.channel.findFirst({
+      const channel = channelOverride || (await prisma.channel.findFirst({
         where: { wabaId },
-      });
+      }));
 
       if (!channel) {
         console.warn(`[webhook] No channel found for wabaId: ${wabaId}`);
@@ -69,7 +74,7 @@ export async function handleInboundWebhookPayload(payload: any): Promise<void> {
       // Now that workspaceId is known, ALL subsequent queries MUST use forWorkspace()
       // to maintain strict tenant isolation.
       // -----------------------------------------------------------------------
-      const db = forWorkspace(channel.workspaceId);
+      const db = dbOverride || forWorkspace(channel.workspaceId);
 
       for (const message of messages) {
         // Normalize message.from into E.164
@@ -181,99 +186,111 @@ export async function handleInboundWebhookPayload(payload: any): Promise<void> {
           }
         }
 
-        // 4. If wasNewMessage is false (duplicate), skip Conversation timestamp update entirely
-        if (!wasNewMessage) {
-          continue;
+        // 3. ONLY IF wasNewMessage is true: update Conversation's lastInboundAt and windowExpiresAt
+        if (wasNewMessage) {
+          const now = new Date();
+          const windowExpiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+          await db.conversation.update({
+            where: { id: conversation.id },
+            data: {
+              lastInboundAt: now,
+              windowExpiresAt,
+            },
+          });
         }
 
-        // 3. ONLY IF wasNewMessage is true: update Conversation's lastInboundAt and windowExpiresAt
-        const now = new Date();
-        const windowExpiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
-        await db.conversation.update({
-          where: { id: conversation.id },
-          data: {
-            lastInboundAt: now,
-            windowExpiresAt,
-          },
-        });
-
-        // 4. Process STOP / START marketing consent keywords idempotently
+        // 4. Process STOP / START marketing consent keywords idempotently.
+        // Runs for both genuine new messages AND redeliveries/retries,
+        // ensuring a crash between message insertion and consent update does not drop customer opt-out.
         const rawBody = message.text?.body;
         if (rawBody && typeof rawBody === "string") {
           if (isStopKeyword(rawBody)) {
-            await setMarketingConsent(db, {
+            const consentResult = await setMarketingConsent(db, {
               contactId: contact.id,
               status: "OPTED_OUT",
               source: "INBOUND_STOP",
               evidence: { text: rawBody, messageId: message.id },
             });
 
-            const workspace = await db.workspace.findUnique({
-              where: { id: channel.workspaceId },
-            });
-            const workspaceName = workspace?.name || "our store";
-            const confirmationText = `You've been unsubscribed from promotional messages from ${workspaceName}. Reply START to subscribe again.`;
+            // Send confirmation reply ONLY if consent was actually changed
+            if (consentResult.updated) {
+              const workspace = await db.workspace.findUnique({
+                where: { id: channel.workspaceId },
+              });
+              const workspaceName = workspace?.name || "our store";
+              const confirmationText = `You've been unsubscribed from promotional messages from ${workspaceName}. Reply START to subscribe again.`;
 
-            if (channel.accessTokenEnc && channel.phoneNumberId) {
-              try {
-                const accessToken = decryptToken(channel.accessTokenEnc);
-                const sendResult = await sendFreeformMessage({
-                  accessToken,
-                  phoneNumberId: channel.phoneNumberId,
-                  to: contact.phone,
-                  body: confirmationText,
-                });
-
-                await db.message.create({
-                  data: {
-                    conversationId: conversation.id,
-                    contactId: contact.id,
-                    direction: "outbound",
-                    providerMessageId: sendResult.providerMessageId,
+              if (channel.accessTokenEnc && channel.phoneNumberId) {
+                try {
+                  const accessToken = decryptToken(channel.accessTokenEnc);
+                  const sendFn = sendMessageOverride || sendFreeformMessage;
+                  const sendResult = await sendFn({
+                    accessToken,
+                    phoneNumberId: channel.phoneNumberId,
+                    to: contact.phone,
                     body: confirmationText,
-                    status: "sent",
-                  } as any,
-                });
-              } catch (sendErr) {
-                console.warn(`[webhook] Failed to send STOP confirmation message:`, sendErr);
+                  });
+
+                  await db.message.create({
+                    data: {
+                      conversationId: conversation.id,
+                      contactId: contact.id,
+                      direction: "outbound",
+                      providerMessageId: sendResult.providerMessageId,
+                      body: confirmationText,
+                      status: "sent",
+                    } as any,
+                  });
+                } catch (sendErr) {
+                  console.warn(`[webhook] Failed to send STOP confirmation message:`, sendErr);
+                }
               }
             }
           } else if (isStartKeyword(rawBody)) {
-            await setMarketingConsent(db, {
+            const consentResult = await setMarketingConsent(db, {
               contactId: contact.id,
               status: "OPTED_IN",
               source: "INBOUND_START",
               evidence: { text: rawBody, messageId: message.id },
             });
 
-            const confirmationText = "You're subscribed again. Reply STOP anytime to unsubscribe.";
+            // Send confirmation reply ONLY if consent was actually changed
+            if (consentResult.updated) {
+              const confirmationText = "You're subscribed again. Reply STOP anytime to unsubscribe.";
 
-            if (channel.accessTokenEnc && channel.phoneNumberId) {
-              try {
-                const accessToken = decryptToken(channel.accessTokenEnc);
-                const sendResult = await sendFreeformMessage({
-                  accessToken,
-                  phoneNumberId: channel.phoneNumberId,
-                  to: contact.phone,
-                  body: confirmationText,
-                });
-
-                await db.message.create({
-                  data: {
-                    conversationId: conversation.id,
-                    contactId: contact.id,
-                    direction: "outbound",
-                    providerMessageId: sendResult.providerMessageId,
+              if (channel.accessTokenEnc && channel.phoneNumberId) {
+                try {
+                  const accessToken = decryptToken(channel.accessTokenEnc);
+                  const sendFn = sendMessageOverride || sendFreeformMessage;
+                  const sendResult = await sendFn({
+                    accessToken,
+                    phoneNumberId: channel.phoneNumberId,
+                    to: contact.phone,
                     body: confirmationText,
-                    status: "sent",
-                  } as any,
-                });
-              } catch (sendErr) {
-                console.warn(`[webhook] Failed to send START confirmation message:`, sendErr);
+                  });
+
+                  await db.message.create({
+                    data: {
+                      conversationId: conversation.id,
+                      contactId: contact.id,
+                      direction: "outbound",
+                      providerMessageId: sendResult.providerMessageId,
+                      body: confirmationText,
+                      status: "sent",
+                    } as any,
+                  });
+                } catch (sendErr) {
+                  console.warn(`[webhook] Failed to send START confirmation message:`, sendErr);
+                }
               }
             }
           }
+        }
+
+        // 5. If this was a duplicate message, skip any further non-idempotent processing
+        if (!wasNewMessage) {
+          continue;
         }
       }
     }

@@ -62,6 +62,16 @@ shopifyWebhooksRouter.post(
       return;
     }
 
+    // Update store_connections.last_webhook_at whenever a verified webhook is processed
+    await prisma.storeConnection
+      .update({
+        where: { id: storeConnection.id },
+        data: { lastWebhookAt: new Date() },
+      })
+      .catch((err) => {
+        console.error("[shopify-webhook] Failed to update lastWebhookAt:", err);
+      });
+
     const topic = req.headers["x-shopify-topic"] as string | undefined;
 
     try {

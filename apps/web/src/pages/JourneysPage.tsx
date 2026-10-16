@@ -20,7 +20,9 @@ import {
   Trash2,
   Sparkles,
   Search,
+  Activity,
 } from "lucide-react";
+import { JourneyActivityDrawer } from "../components/JourneyActivityDrawer";
 
 export interface JourneyVersion {
   id: string;
@@ -52,6 +54,7 @@ export interface Template {
   bodyPreview?: string;
   placeholders?: string[];
   positionalPlaceholders?: string[];
+  buttons?: any;
 }
 
 export interface Channel {
@@ -109,6 +112,45 @@ function getTemplatePlaceholders(template?: Template): string[] {
   return Array.from(new Set(list));
 }
 
+function getTemplateDynamicButton(template?: Template | null): {
+  button: any;
+  index: number;
+  base: string;
+  text: string;
+  url: string;
+} | null {
+  if (!template || !template.buttons) return null;
+  const rawButtons = template.buttons;
+  let buttons: any[] = [];
+  if (Array.isArray(rawButtons)) {
+    buttons = rawButtons;
+  } else if (typeof rawButtons === "string") {
+    try {
+      buttons = JSON.parse(rawButtons);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!Array.isArray(buttons)) return null;
+
+  for (let i = 0; i < buttons.length; i++) {
+    const b = buttons[i];
+    const type = String(b?.type || "").toUpperCase();
+    if (type === "URL" && typeof b?.url === "string" && b.url.includes("{{1}}")) {
+      return {
+        button: b,
+        index: i,
+        base: b.url.split("{{1}}")[0],
+        text: b.text || "Button",
+        url: b.url,
+      };
+    }
+  }
+
+  return null;
+}
+
 function journeyNeedsVariableMapping(journey: Journey, templates: Template[]): boolean {
   if (!journey.versions || journey.versions.length === 0) return false;
   const targetVersion = journey.currentVersionId
@@ -121,16 +163,32 @@ function journeyNeedsVariableMapping(journey: Journey, templates: Template[]): b
       const tpl = templates.find((t) => t.id === step.templateId);
       if (!tpl) continue;
       const placeholders = getTemplatePlaceholders(tpl);
-      if (placeholders.length === 0) continue;
+      const dynamicBtn = getTemplateDynamicButton(tpl);
       const mapping = step.variableMapping || {};
       for (const p of placeholders) {
         const entry = mapping[p];
         if (!entry) return true;
         if (entry.source === "contact_field" && !entry.field) return true;
         if (entry.source === "contact_attribute" && !entry.key?.trim()) return true;
+        if (entry.source === "trigger_field" && !entry.field) return true;
         if (
           entry.source === "fixed" &&
           (entry.value === undefined || entry.value === null || entry.value.trim() === "")
+        )
+          return true;
+      }
+      if (dynamicBtn) {
+        const btnEntry =
+          mapping["button:url"] ||
+          mapping[`button:${dynamicBtn.index}`] ||
+          mapping["button_url"];
+        if (!btnEntry) return true;
+        if (btnEntry.source === "trigger_field" && !btnEntry.field) return true;
+        if (btnEntry.source === "contact_field" && !btnEntry.field) return true;
+        if (btnEntry.source === "contact_attribute" && !btnEntry.key?.trim()) return true;
+        if (
+          btnEntry.source === "fixed" &&
+          (btnEntry.value === undefined || btnEntry.value === null || btnEntry.value.trim() === "")
         )
           return true;
       }
@@ -139,13 +197,40 @@ function journeyNeedsVariableMapping(journey: Journey, templates: Template[]): b
   return false;
 }
 
+const CART_TRIGGER_FIELDS = [
+  { value: "cart.recovery_url", label: "Cart recovery full URL" },
+  { value: "cart.recovery_path", label: "Cart recovery link" },
+  { value: "cart.total", label: "Cart total" },
+  { value: "cart.currency", label: "Cart currency" },
+  { value: "cart.item_count", label: "Cart item count" },
+  { value: "cart.first_item_name", label: "First item name" },
+  { value: "cart.items_summary", label: "Items summary" },
+];
+
+const ORDER_TRIGGER_FIELDS = [
+  { value: "order.number", label: "Order number" },
+  { value: "order.total", label: "Order total" },
+  { value: "order.currency", label: "Order currency" },
+  { value: "order.item_count", label: "Order item count" },
+  { value: "order.items_summary", label: "Items summary" },
+];
+
 /**
  * Validates a tree of FriendlyStep objects before submission.
  */
-function validateFriendlySteps(steps: FriendlyStep[], templates?: Template[]): string | null {
+function validateFriendlySteps(
+  steps: FriendlyStep[],
+  templates?: Template[],
+  triggerEvent?: string
+): string | null {
   if (steps.length === 0) {
     return "Journey must have at least one step.";
   }
+
+  const isCart = triggerEvent === "cart_abandoned";
+  const isOrder =
+    triggerEvent &&
+    ["order_placed_cod", "order_status_changed", "order_delivered"].includes(triggerEvent);
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -176,11 +261,44 @@ function validateFriendlySteps(steps: FriendlyStep[], templates?: Template[]): s
             if (entry.source === "contact_attribute" && !entry.key?.trim()) {
               return `Step ${i + 1}: Provide an attribute key for placeholder '{{${p}}}'.`;
             }
+            if (entry.source === "trigger_field") {
+              if (!entry.field) {
+                return `Step ${i + 1}: Select a cart/order data field for placeholder '{{${p}}}'.`;
+              }
+              if (isCart && !entry.field.startsWith("cart.")) {
+                return `Step ${i + 1}: Cart trigger only supports cart.* trigger fields for placeholder '{{${p}}}'.`;
+              }
+              if (isOrder && !entry.field.startsWith("order.")) {
+                return `Step ${i + 1}: Order trigger only supports order.* trigger fields for placeholder '{{${p}}}'.`;
+              }
+            }
             if (
               entry.source === "fixed" &&
               (entry.value === undefined || entry.value === null || entry.value.trim() === "")
             ) {
               return `Step ${i + 1}: Provide a fixed value for placeholder '{{${p}}}'.`;
+            }
+          }
+
+          const dynamicBtn = getTemplateDynamicButton(tpl);
+          if (dynamicBtn) {
+            const btnEntry =
+              mapping["button:url"] ||
+              mapping[`button:${dynamicBtn.index}`] ||
+              mapping["button_url"];
+            if (!btnEntry) {
+              return `Step ${i + 1} (Send a message): Template has dynamic URL button '${dynamicBtn.text}' but is missing a button variable mapping.`;
+            }
+            if (btnEntry.source === "trigger_field") {
+              if (!btnEntry.field) {
+                return `Step ${i + 1}: Select a field for dynamic button '${dynamicBtn.text}'.`;
+              }
+              if (isCart && !btnEntry.field.startsWith("cart.")) {
+                return `Step ${i + 1}: Cart trigger only supports cart.* trigger fields for button '${dynamicBtn.text}'.`;
+              }
+              if (isOrder && !btnEntry.field.startsWith("order.")) {
+                return `Step ${i + 1}: Order trigger only supports order.* trigger fields for button '${dynamicBtn.text}'.`;
+              }
             }
           }
         }
@@ -191,11 +309,11 @@ function validateFriendlySteps(steps: FriendlyStep[], templates?: Template[]): s
       step.kind === "check_customer_replied_decline"
     ) {
       if (step.ifYes.length > 0) {
-        const err = validateFriendlySteps(step.ifYes, templates);
+        const err = validateFriendlySteps(step.ifYes, templates, triggerEvent);
         if (err) return `In Step ${i + 1} (If Yes branch): ${err}`;
       }
       if (step.ifNo.length > 0) {
-        const err = validateFriendlySteps(step.ifNo, templates);
+        const err = validateFriendlySteps(step.ifNo, templates, triggerEvent);
         if (err) return `In Step ${i + 1} (If No branch): ${err}`;
       }
     }
@@ -213,6 +331,7 @@ interface StepListEditorProps {
   onChange: (steps: FriendlyStep[]) => void;
   templates: Template[];
   channels: Channel[];
+  triggerEvent?: string;
   depth?: number;
 }
 
@@ -221,9 +340,20 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
   onChange,
   templates,
   channels,
+  triggerEvent = "cart_abandoned",
   depth = 0,
 }) => {
   const [addingKind, setAddingKind] = useState<string>("wait");
+
+  const isCartTrigger = triggerEvent === "cart_abandoned";
+  const isOrderTrigger = ["order_placed_cod", "order_status_changed", "order_delivered"].includes(
+    triggerEvent
+  );
+  const validTriggerFields = isCartTrigger
+    ? CART_TRIGGER_FIELDS
+    : isOrderTrigger
+    ? ORDER_TRIGGER_FIELDS
+    : [];
 
   const updateStep = (index: number, updated: FriendlyStep) => {
     const next = [...steps];
@@ -297,13 +427,15 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                   const tpl = templates.find((t) => t.id === step.templateId);
                   if (!tpl) return null;
                   const placeholders = getTemplatePlaceholders(tpl);
-                  if (placeholders.length === 0) return null;
+                  const dynamicBtn = getTemplateDynamicButton(tpl);
+                  if (placeholders.length === 0 && !dynamicBtn) return null;
                   const mapping = step.variableMapping || {};
                   const isMissing = placeholders.some((p) => {
                     const entry = mapping[p];
                     if (!entry) return true;
                     if (entry.source === "contact_field" && !entry.field) return true;
                     if (entry.source === "contact_attribute" && !entry.key?.trim()) return true;
+                    if (entry.source === "trigger_field" && !entry.field) return true;
                     if (
                       entry.source === "fixed" &&
                       (entry.value === undefined || entry.value === null || entry.value.trim() === "")
@@ -311,7 +443,12 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                       return true;
                     return false;
                   });
-                  return isMissing ? (
+                  const isBtnMissing =
+                    dynamicBtn &&
+                    !mapping["button:url"] &&
+                    !mapping[`button:${dynamicBtn.index}`] &&
+                    !mapping["button_url"];
+                  return (isMissing || isBtnMissing) ? (
                     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-800 border border-amber-300">
                       <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
                       Needs variable mapping
@@ -382,6 +519,7 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
             {step.kind === "send_message" && (() => {
               const selectedTemplate = templates.find((tpl) => tpl.id === step.templateId);
               const placeholders = getTemplatePlaceholders(selectedTemplate);
+              const dynamicButton = getTemplateDynamicButton(selectedTemplate);
               const mapping = step.variableMapping || {};
 
               return (
@@ -402,7 +540,12 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                             const nextTemplateId = e.target.value;
                             const nextTemplate = templates.find((t) => t.id === nextTemplateId);
                             const nextPlaceholders = getTemplatePlaceholders(nextTemplate);
-                            const updatedMapping = reconcileVariableMapping(step.variableMapping, nextPlaceholders);
+                            const nextHasDynamicBtn = !!getTemplateDynamicButton(nextTemplate);
+                            const updatedMapping = reconcileVariableMapping(
+                              step.variableMapping,
+                              nextPlaceholders,
+                              nextHasDynamicBtn
+                            );
                             updateStep(index, {
                               ...step,
                               templateId: nextTemplateId,
@@ -482,6 +625,8 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                               inlineError = "Variable is unmapped";
                             } else if (entry.source === "contact_field" && !entry.field) {
                               inlineError = "Select a contact field";
+                            } else if (entry.source === "trigger_field" && !entry.field) {
+                              inlineError = "Select a cart/order field";
                             } else if (entry.source === "contact_attribute" && !entry.key?.trim()) {
                               inlineError = "Enter an attribute key";
                             } else if (
@@ -491,6 +636,13 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                               inlineError = "Enter a fixed value";
                             }
 
+                            const selectedValue =
+                              entry.source === "trigger_field"
+                                ? `trigger_field:${entry.field || (isCartTrigger ? "cart.recovery_url" : "order.number")}`
+                                : entry.source === "contact_field"
+                                ? `contact_field:${entry.field || "name"}`
+                                : entry.source;
+
                             return (
                               <div
                                 key={placeholder}
@@ -498,7 +650,7 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                                   inlineError ? "border-amber-300 bg-amber-50/20" : "border-crm-border"
                                 }`}
                               >
-                                <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
                                   <div className="flex items-center gap-1.5">
                                     <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-crm-accentSubtle text-crm-accent border border-crm-accentBorder">
                                       {"{{"}{placeholder}{"}}"}
@@ -511,101 +663,84 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                                     )}
                                   </div>
 
-                                  {/* Source Toggle */}
-                                  <div className="inline-flex p-0.5 rounded-md bg-crm-subtle border border-crm-border text-xs">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const newMapping = {
-                                          ...mapping,
-                                          [placeholder]: {
-                                            source: "contact_field" as const,
-                                            field: entry.field || "name",
-                                            fallback: entry.fallback || "",
-                                          },
-                                        };
-                                        updateStep(index, { ...step, variableMapping: newMapping });
+                                  {/* Placeholder Mapping Source Dropdown */}
+                                  <div className="flex items-center gap-1.5">
+                                    <label className="text-[10px] font-medium text-crm-textSecondary whitespace-nowrap">
+                                      Source:
+                                    </label>
+                                    <select
+                                      value={selectedValue}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        if (val.startsWith("trigger_field:")) {
+                                          const field = val.replace("trigger_field:", "");
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              source: "trigger_field" as const,
+                                              field,
+                                              fallback: entry.fallback || "",
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        } else if (val.startsWith("contact_field:")) {
+                                          const field = val.replace("contact_field:", "");
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              source: "contact_field" as const,
+                                              field: field as "name" | "email" | "phone",
+                                              fallback: entry.fallback || "",
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        } else if (val === "contact_attribute") {
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              source: "contact_attribute" as const,
+                                              key: entry.key || "",
+                                              fallback: entry.fallback || "",
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        } else if (val === "fixed") {
+                                          const newMapping = {
+                                            ...mapping,
+                                            [placeholder]: {
+                                              source: "fixed" as const,
+                                              value: entry.value || "",
+                                            },
+                                          };
+                                          updateStep(index, { ...step, variableMapping: newMapping });
+                                        }
                                       }}
-                                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                                        entry.source === "contact_field"
-                                          ? "bg-crm-accent text-white shadow-xs font-semibold"
-                                          : "text-crm-textSecondary hover:text-crm-text"
-                                      }`}
+                                      className="px-2 py-1 bg-crm-surface border border-crm-border rounded text-xs text-crm-text focus:outline-none focus:border-crm-accent"
                                     >
-                                      Contact Field
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const newMapping = {
-                                          ...mapping,
-                                          [placeholder]: {
-                                            source: "contact_attribute" as const,
-                                            key: entry.key || "",
-                                            fallback: entry.fallback || "",
-                                          },
-                                        };
-                                        updateStep(index, { ...step, variableMapping: newMapping });
-                                      }}
-                                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                                        entry.source === "contact_attribute"
-                                          ? "bg-crm-accent text-white shadow-xs font-semibold"
-                                          : "text-crm-textSecondary hover:text-crm-text"
-                                      }`}
-                                    >
-                                      Custom Attribute
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const newMapping = {
-                                          ...mapping,
-                                          [placeholder]: {
-                                            source: "fixed" as const,
-                                            value: entry.value || "",
-                                          },
-                                        };
-                                        updateStep(index, { ...step, variableMapping: newMapping });
-                                      }}
-                                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                                        entry.source === "fixed"
-                                          ? "bg-crm-accent text-white shadow-xs font-semibold"
-                                          : "text-crm-textSecondary hover:text-crm-text"
-                                      }`}
-                                    >
-                                      Fixed Text
-                                    </button>
+                                      <optgroup label="Contact Fields">
+                                        <option value="contact_field:name">Contact Name (name)</option>
+                                        <option value="contact_field:phone">Phone Number (phone)</option>
+                                        <option value="contact_field:email">Email Address (email)</option>
+                                      </optgroup>
+                                      {validTriggerFields.length > 0 && (
+                                        <optgroup label="Cart/Order data">
+                                          {validTriggerFields.map((f) => (
+                                            <option key={f.value} value={`trigger_field:${f.value}`}>
+                                              {f.label}
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      )}
+                                      <optgroup label="Custom / Static">
+                                        <option value="contact_attribute">Custom Contact Attribute</option>
+                                        <option value="fixed">Fixed Text</option>
+                                      </optgroup>
+                                    </select>
                                   </div>
                                 </div>
 
                                 {/* Inputs */}
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                  {entry.source === "contact_field" && (
-                                    <div>
-                                      <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
-                                        Field
-                                      </label>
-                                      <select
-                                        value={entry.field || "name"}
-                                        onChange={(e) => {
-                                          const newMapping = {
-                                            ...mapping,
-                                            [placeholder]: {
-                                              ...entry,
-                                              field: e.target.value as "name" | "email" | "phone",
-                                            },
-                                          };
-                                          updateStep(index, { ...step, variableMapping: newMapping });
-                                        }}
-                                        className="w-full px-2 py-1 bg-white border border-crm-border rounded text-xs font-mono text-crm-text focus:outline-none focus:border-crm-accent"
-                                      >
-                                        <option value="name">Contact Name (name)</option>
-                                        <option value="phone">Phone Number (phone)</option>
-                                        <option value="email">Email Address (email)</option>
-                                      </select>
-                                    </div>
-                                  )}
-
                                   {entry.source === "contact_attribute" && (
                                     <div>
                                       <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
@@ -654,14 +789,26 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                                     </div>
                                   )}
 
-                                  {(entry.source === "contact_field" || entry.source === "contact_attribute") && (
-                                    <div>
+                                  {(entry.source === "contact_field" ||
+                                    entry.source === "contact_attribute" ||
+                                    entry.source === "trigger_field") && (
+                                    <div
+                                      className={
+                                        entry.source === "contact_field" || entry.source === "trigger_field"
+                                          ? "sm:col-span-2"
+                                          : ""
+                                      }
+                                    >
                                       <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
                                         Optional Fallback <span className="text-crm-textMuted font-normal">(used if empty)</span>
                                       </label>
                                       <input
                                         type="text"
-                                        placeholder='e.g. "there" or "Valued Customer"'
+                                        placeholder={
+                                          entry.source === "trigger_field"
+                                            ? 'e.g. "your items" or "N/A"'
+                                            : 'e.g. "there" or "Valued Customer"'
+                                        }
                                         value={entry.fallback || ""}
                                         onChange={(e) => {
                                           const newMapping = {
@@ -683,6 +830,133 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                           })}
                         </div>
                       )}
+
+                      {/* Dynamic URL Button Link Row */}
+                      {dynamicButton && (() => {
+                        const btnEntry: VariableMappingEntry =
+                          mapping["button:url"] ||
+                          mapping[`button:${dynamicButton.index}`] ||
+                          mapping["button_url"] || {
+                            source: "trigger_field",
+                            field: isCartTrigger ? "cart.recovery_path" : "",
+                          };
+
+                        let inlineBtnError: string | null = null;
+                        if (!mapping["button:url"] && !mapping[`button:${dynamicButton.index}`] && !mapping["button_url"]) {
+                          inlineBtnError = "Button link is unmapped";
+                        } else if (btnEntry.source === "trigger_field" && !btnEntry.field) {
+                          inlineBtnError = "Select a button link field";
+                        }
+
+                        return (
+                          <div
+                            className={`p-2.5 bg-white border rounded-lg space-y-2 mt-2 ${
+                              inlineBtnError ? "border-amber-300 bg-amber-50/20" : "border-crm-border"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5">
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                                  Button link
+                                </span>
+                                <span className="text-[11px] text-crm-textSecondary font-medium">
+                                  {dynamicButton.text} ({dynamicButton.base}{"{{1}}"})
+                                </span>
+                                {inlineBtnError && (
+                                  <span className="text-[10px] text-amber-700 font-medium flex items-center gap-1">
+                                    <AlertCircle className="w-3 h-3 text-amber-600" />
+                                    {inlineBtnError}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-1.5">
+                                <label className="text-[10px] font-medium text-crm-textSecondary whitespace-nowrap">
+                                  Source:
+                                </label>
+                                <select
+                                  value={
+                                    btnEntry.source === "trigger_field"
+                                      ? btnEntry.field || (isCartTrigger ? "cart.recovery_path" : "")
+                                      : btnEntry.source
+                                  }
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    let newEntry: VariableMappingEntry;
+                                    if (val.startsWith("cart.") || val.startsWith("order.")) {
+                                      newEntry = {
+                                        source: "trigger_field",
+                                        field: val,
+                                        fallback: btnEntry.fallback || "",
+                                      };
+                                    } else if (val === "fixed") {
+                                      newEntry = {
+                                        source: "fixed",
+                                        value: btnEntry.value || "",
+                                        fallback: btnEntry.fallback || "",
+                                      };
+                                    } else {
+                                      newEntry = {
+                                        source: "trigger_field",
+                                        field: val,
+                                        fallback: btnEntry.fallback || "",
+                                      };
+                                    }
+                                    const newMapping = {
+                                      ...mapping,
+                                      "button:url": newEntry,
+                                    };
+                                    updateStep(index, { ...step, variableMapping: newMapping });
+                                  }}
+                                  className="px-2 py-1 bg-crm-surface border border-crm-border rounded text-xs text-crm-text focus:outline-none focus:border-crm-accent"
+                                >
+                                  {isCartTrigger && (
+                                    <optgroup label="Cart Link Fields">
+                                      <option value="cart.recovery_path">Cart recovery link</option>
+                                      <option value="cart.recovery_url">Cart recovery full URL</option>
+                                    </optgroup>
+                                  )}
+                                  {isOrderTrigger && (
+                                    <optgroup label="Order Fields">
+                                      {ORDER_TRIGGER_FIELDS.map((f) => (
+                                        <option key={f.value} value={f.value}>
+                                          {f.label}
+                                        </option>
+                                      ))}
+                                    </optgroup>
+                                  )}
+                                  <optgroup label="Other">
+                                    <option value="fixed">Fixed Path</option>
+                                  </optgroup>
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* Fallback input */}
+                            <div>
+                              <label className="block text-[10px] font-medium text-crm-textSecondary mb-0.5">
+                                Optional Fallback <span className="text-crm-textMuted font-normal">(used if empty or mismatched)</span>
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="e.g. cart or checkouts"
+                                value={btnEntry.fallback || ""}
+                                onChange={(e) => {
+                                  const newMapping = {
+                                    ...mapping,
+                                    "button:url": {
+                                      ...btnEntry,
+                                      fallback: e.target.value,
+                                    },
+                                  };
+                                  updateStep(index, { ...step, variableMapping: newMapping });
+                                }}
+                                className="w-full px-2 py-1 bg-white border border-crm-border rounded text-xs text-crm-text placeholder-crm-textMuted focus:outline-none focus:border-crm-accent"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
@@ -723,6 +997,7 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                       }
                       templates={templates}
                       channels={channels}
+                      triggerEvent={triggerEvent}
                       depth={depth + 1}
                     />
 
@@ -752,6 +1027,7 @@ const StepListEditor: React.FC<StepListEditorProps> = ({
                       }
                       templates={templates}
                       channels={channels}
+                      triggerEvent={triggerEvent}
                       depth={depth + 1}
                     />
 
@@ -823,6 +1099,7 @@ export const JourneysPage: React.FC = () => {
     action: "pause" | "activate";
   } | null>(null);
   const [confirmActionLoading, setConfirmActionLoading] = useState<boolean>(false);
+  const [selectedActivityJourney, setSelectedActivityJourney] = useState<Journey | null>(null);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -904,7 +1181,7 @@ export const JourneysPage: React.FC = () => {
       return;
     }
 
-    const validationErr = validateFriendlySteps(steps, templates);
+    const validationErr = validateFriendlySteps(steps, templates, triggerEvent);
     if (validationErr) {
       setModalError(validationErr);
       return;
@@ -1110,35 +1387,46 @@ export const JourneysPage: React.FC = () => {
                       {formatDate(journey.createdAt)}
                     </td>
                     <td className="py-3 px-4 text-right">
-                      {journey.status === "active" ? (
+                      <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
-                          onClick={() => setConfirmJourneyAction({ journey, action: "pause" })}
-                          disabled={isActionBusy}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 rounded hover:bg-amber-100 transition-colors disabled:opacity-50"
+                          onClick={() => setSelectedActivityJourney(journey)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-crm-text bg-white border border-crm-border rounded hover:bg-crm-elevated transition-colors shadow-sm"
+                          title="View activity and run history"
                         >
-                          {isActionBusy ? (
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Pause className="w-3 h-3" />
-                          )}
-                          Pause
+                          <Activity className="w-3 h-3 text-crm-accent" />
+                          Activity
                         </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setConfirmJourneyAction({ journey, action: "activate" })}
-                          disabled={isActionBusy}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-300 rounded hover:bg-emerald-100 transition-colors disabled:opacity-50"
-                        >
-                          {isActionBusy ? (
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Play className="w-3 h-3" />
-                          )}
-                          Activate
-                        </button>
-                      )}
+                        {journey.status === "active" ? (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmJourneyAction({ journey, action: "pause" })}
+                            disabled={isActionBusy}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-300 rounded hover:bg-amber-100 transition-colors disabled:opacity-50"
+                          >
+                            {isActionBusy ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Pause className="w-3 h-3" />
+                            )}
+                            Pause
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmJourneyAction({ journey, action: "activate" })}
+                            disabled={isActionBusy}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-300 rounded hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                          >
+                            {isActionBusy ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Play className="w-3 h-3" />
+                            )}
+                            Activate
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1234,6 +1522,7 @@ export const JourneysPage: React.FC = () => {
                   onChange={setSteps}
                   templates={templates}
                   channels={channels}
+                  triggerEvent={triggerEvent}
                   depth={0}
                 />
               </div>
@@ -1311,6 +1600,14 @@ export const JourneysPage: React.FC = () => {
         onConfirm={handleExecuteJourneyAction}
         onCancel={() => setConfirmJourneyAction(null)}
       />
+
+      {/* Journey Activity & Runs Drawer */}
+      {selectedActivityJourney && (
+        <JourneyActivityDrawer
+          journey={selectedActivityJourney}
+          onClose={() => setSelectedActivityJourney(null)}
+        />
+      )}
     </div>
   );
 };
